@@ -7,8 +7,8 @@ use std::sync::OnceLock;
 static CONFIG_ENV: OnceLock<HashMap<String, String>> = OnceLock::new();
 
 pub(crate) fn status_is_enabled(status: &str) -> bool {
-    let configured = config_var("HERDR_FOCUS_NOTIFY_STATUSES")
-        .unwrap_or_else(|| "blocked,done,idle".to_string());
+    let configured =
+        config_var("HERDR_FOCUS_NOTIFY_STATUSES").unwrap_or_else(|| "blocked,done".to_string());
 
     configured
         .split(',')

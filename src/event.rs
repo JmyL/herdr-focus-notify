@@ -35,11 +35,10 @@ pub(crate) fn notification_from_event_json(
         .trim()
         .to_ascii_lowercase();
 
-    // Blocked needs attention. Done and idle both represent a completed
-    // background turn across current Herdr releases/agent integrations.
-    // HERDR_FOCUS_NOTIFY_STATUSES can only narrow this set afterwards
-    // (see config::status_is_enabled).
-    if status != "blocked" && status != "done" && status != "idle" {
+    // Only blocked and done need user action, so they are the only statuses
+    // that can ever notify; HERDR_FOCUS_NOTIFY_STATUSES can only narrow this
+    // set afterwards (see config::status_is_enabled).
+    if status != "blocked" && status != "done" {
         return Ok(None);
     }
 
@@ -54,7 +53,7 @@ pub(crate) fn notification_from_event_json(
 
     let base_title = match status.as_str() {
         "blocked" => format!("{agent} needs attention"),
-        "done" | "idle" => format!("{agent} finished"),
+        "done" => format!("{agent} finished"),
         _ => unreachable!("status already filtered"),
     };
     let title = if let Some(custom_status) = first_non_empty([data.custom_status.as_deref()]) {
@@ -166,24 +165,6 @@ mod tests {
         assert_eq!(notification.title, "Codex finished");
         assert_eq!(notification.body, "Implement plugin");
         assert!(notification.app_icon.is_some());
-    }
-
-    #[test]
-    fn builds_finished_notification_from_idle_status() {
-        let json = r#"{
-            "data": {
-                "pane_id": "p1",
-                "agent_status": "idle",
-                "agent": "Codex",
-                "title": "Implement plugin"
-            }
-        }"#;
-
-        let notification = notification_from_event_json(json).unwrap().unwrap();
-
-        assert_eq!(notification.status, "idle");
-        assert_eq!(notification.title, "Codex finished");
-        assert_eq!(notification.body, "Implement plugin");
     }
 
     #[test]
