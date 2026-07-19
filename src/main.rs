@@ -18,8 +18,8 @@ use config::{is_enabled, status_is_enabled};
 use event::{focused_pane_id_from_event_json, notification_from_event_json};
 use executable::resolve_herdr_bin;
 use focus::{
-    notification_decision, should_clear_notification_on_focus, test_notification,
-    NotificationDecision,
+    cache_current_sway_container_for_pane, notification_decision,
+    should_clear_notification_on_focus, test_notification, NotificationDecision,
 };
 use notifier::{remove_notification, resolve_notifier_bin, send_notification};
 use script::write_focus_script;
@@ -74,6 +74,10 @@ fn run() -> Result<(), String> {
                 let Some(pane_id) = focused_pane_id_from_event_json(&event_json)? else {
                     return Ok(());
                 };
+
+                if let Err(err) = cache_current_sway_container_for_pane(&pane_id) {
+                    eprintln!("herdr-focus-notify: {err}");
+                }
 
                 if should_clear_notification_on_focus() {
                     mark_notification_cleared(&pane_id)

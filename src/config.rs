@@ -42,6 +42,12 @@ pub(crate) fn alerter_timeout_secs() -> u64 {
     parse_timeout_secs(config_var("HERDR_FOCUS_NOTIFY_TIMEOUT"))
 }
 
+pub(crate) fn is_linux_notifier() -> bool {
+    config_var("HERDR_FOCUS_NOTIFY_NOTIFIER_BACKEND")
+        .map(|value| value.trim().eq_ignore_ascii_case("linux"))
+        .unwrap_or(cfg!(target_os = "linux"))
+}
+
 pub(crate) fn activate_app() -> Option<String> {
     config_var("HERDR_FOCUS_NOTIFY_ACTIVATE_APP")
 }

@@ -1,9 +1,9 @@
 id = "herdr-focus-notify"
 name = "Herdr Focus Notify"
-version = "0.3.6"
+version = "0.3.7"
 min_herdr_version = "0.7.3"
 description = "Clickable desktop notifications that focus the relevant Herdr agent pane."
-platforms = ["macos"]
+platforms = ["macos", "linux"]
 
 [[build]]
 command = ["cargo", "build", "--release"]

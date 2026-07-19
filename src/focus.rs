@@ -1,8 +1,10 @@
 use serde::Deserialize;
 use std::process::Command;
 
-use crate::config::activate_app;
+use crate::config::{activate_app, is_linux_notifier};
 use crate::notification::FocusNotification;
+use crate::notifier::host_command;
+use crate::state::cache_sway_container_id;
 use crate::util::sanitize_group_id;
 
 #[derive(Debug, Deserialize)]
@@ -41,6 +43,14 @@ pub(crate) fn test_notification(herdr_bin: &str) -> FocusNotification {
 }
 
 pub(crate) fn notification_decision(pane_id: &str, herdr_bin: &str) -> NotificationDecision {
+    if is_linux_notifier() {
+        return if pane_is_focused(pane_id, herdr_bin) {
+            NotificationDecision::Skip
+        } else {
+            NotificationDecision::Send
+        };
+    }
+
     notification_decision_from_focus_and_bundles(
         pane_is_focused(pane_id, herdr_bin),
         herdr_bundle_id(),
@@ -49,7 +59,24 @@ pub(crate) fn notification_decision(pane_id: &str, herdr_bin: &str) -> Notificat
 }
 
 pub(crate) fn should_clear_notification_on_focus() -> bool {
+    if is_linux_notifier() {
+        return true;
+    }
+
     configured_app_is_frontmost(herdr_bundle_id(), frontmost_bundle_id())
+}
+
+pub(crate) fn cache_current_sway_container_for_pane(pane_id: &str) -> Result<(), String> {
+    if !is_linux_notifier() {
+        return Ok(());
+    }
+
+    let Some(con_id) = current_sway_container_id() else {
+        return Ok(());
+    };
+
+    cache_sway_container_id(pane_id, &con_id)
+        .map_err(|err| format!("failed to cache sway container id: {err}"))
 }
 
 fn pane_is_focused(pane_id: &str, herdr_bin: &str) -> bool {
@@ -133,6 +160,49 @@ fn focused_pane_id_from_agent_list_json(json: &str) -> Result<Option<String>, St
                 .filter(|pane_id| !pane_id.is_empty())
         })
     }))
+}
+
+fn current_sway_container_id() -> Option<String> {
+    let output = host_command("swaymsg")
+        .arg("-t")
+        .arg("get_tree")
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    focused_sway_container_id_from_value(&json)
+}
+
+fn focused_sway_container_id_from_value(value: &serde_json::Value) -> Option<String> {
+    if value
+        .get("focused")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return value.get("id").and_then(|id| match id {
+            serde_json::Value::Number(number) => Some(number.to_string()),
+            serde_json::Value::String(string) => Some(string.clone()),
+            _ => None,
+        });
+    }
+
+    for key in ["nodes", "floating_nodes"] {
+        let Some(nodes) = value.get(key).and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+
+        for node in nodes {
+            if let Some(id) = focused_sway_container_id_from_value(node) {
+                return Some(id);
+            }
+        }
+    }
+
+    None
 }
 
 fn configured_app_is_frontmost(
@@ -238,5 +308,28 @@ mod tests {
             None,
             Some("com.example.Herdr".to_string())
         ));
+    }
+
+    #[test]
+    fn finds_focused_sway_container_id_from_tree() {
+        let json = serde_json::json!({
+            "id": 1,
+            "focused": false,
+            "nodes": [
+                {
+                    "id": 2,
+                    "focused": false,
+                    "nodes": [
+                        {"id": 42, "focused": true, "nodes": []}
+                    ]
+                }
+            ],
+            "floating_nodes": []
+        });
+
+        assert_eq!(
+            focused_sway_container_id_from_value(&json),
+            Some("42".to_string())
+        );
     }
 }

@@ -5,9 +5,12 @@ use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::config::{activate_app, alerter_timeout_secs, is_debug_enabled};
+use crate::config::{activate_app, alerter_timeout_secs, is_debug_enabled, is_linux_notifier};
 use crate::notification::FocusNotification;
-use crate::state::{cleared_notification_marker_path, plugin_state_dir};
+use crate::state::{
+    cached_sway_container_id, cleared_notification_marker_path, notification_id_path,
+    plugin_state_dir,
+};
 use crate::util::shell_quote;
 
 pub(crate) fn write_focus_script(
@@ -32,6 +35,8 @@ pub(crate) fn write_focus_script(
     alerter_timeout_secs().hash(&mut hasher);
     activate_app().hash(&mut hasher);
     is_debug_enabled().hash(&mut hasher);
+    is_linux_notifier().hash(&mut hasher);
+    cached_sway_container_id(&notification.pane_id).hash(&mut hasher);
 
     let script_path = state_dir.join(format!("focus-{:016x}.sh", hasher.finish()));
     let debug_log_path = is_debug_enabled().then(|| state_dir.join("focus-click.log"));
@@ -59,6 +64,16 @@ fn focus_script_content(
     executable_path: Option<&Path>,
     debug_log_path: Option<&Path>,
 ) -> String {
+    if is_linux_notifier() {
+        return linux_focus_script(
+            notification,
+            herdr_bin,
+            notifier_bin,
+            cached_sway_container_id(&notification.pane_id).as_deref(),
+            debug_log_path,
+        );
+    }
+
     alerter_focus_script(
         notification,
         herdr_bin,
@@ -71,6 +86,104 @@ fn focus_script_content(
             .flatten(),
         debug_log_path,
     )
+}
+
+fn linux_focus_script(
+    notification: &FocusNotification,
+    herdr_bin: &str,
+    notifier_bin: &str,
+    sway_container_id: Option<&str>,
+    debug_log_path: Option<&Path>,
+) -> String {
+    let title_q = shell_quote(&notification.title);
+    let body_q = shell_quote(&notification.body);
+    let pane_q = shell_quote(&notification.pane_id);
+    let herdr_q = shell_quote(herdr_bin);
+    let notifier_q = shell_quote(notifier_bin);
+    let con_q = shell_quote(sway_container_id.unwrap_or_default());
+    let cleared_marker = cleared_notification_marker_path(&notification.pane_id);
+    let cleared_marker_q = shell_quote(cleared_marker.to_string_lossy().as_ref());
+    let notification_id_path = notification_id_path(&notification.pane_id);
+    let notification_id_path_q = shell_quote(notification_id_path.to_string_lossy().as_ref());
+    let result_template_q = shell_quote(&format!("{}.result.XXXXXX", cleared_marker.display()));
+    let status_template_q = shell_quote(&format!("{}.status.XXXXXX", cleared_marker.display()));
+
+    let mut script = String::from("#!/bin/sh\n");
+    script.push_str("run_host() {\n");
+    script.push_str("  if command -v \"$1\" >/dev/null 2>&1; then\n");
+    script.push_str("    \"$@\"\n");
+    script.push_str("  elif command -v flatpak-spawn >/dev/null 2>&1; then\n");
+    script.push_str("    flatpak-spawn --host \"$@\"\n");
+    script.push_str("  else\n");
+    script.push_str("    return 127\n");
+    script.push_str("  fi\n");
+    script.push_str("}\n");
+    script.push_str(&format!(
+        "[ -e {cleared_marker} ] && exit 0\n",
+        cleared_marker = cleared_marker_q
+    ));
+    script.push_str(&format!(
+        "mkdir -p \"$(dirname {notification_id_path})\"\nresult_path=$(mktemp {result_template}) || exit 1\nstatus_path=$(mktemp {status_template}) || {{ rm -f \"$result_path\"; exit 1; }}\nid_watcher_pid=\ncleanup() {{\n  [ -z \"$id_watcher_pid\" ] || kill \"$id_watcher_pid\" 2>/dev/null\n  rm -f \"$result_path\" \"$status_path\" {notification_id_path}\n}}\ntrap cleanup EXIT\n(\n  run_host {notifier} --print-id -A focus=Focus --wait {title} {body} > \"$result_path\" 2>/dev/null\n  printf '%s' \"$?\" > \"$status_path\"\n) &\nnotifier_pid=$!\n(\n  while kill -0 \"$notifier_pid\" 2>/dev/null; do\n    notification_id=$(sed -n 's/^\\([0-9][0-9]*\\)$/\\1/p' \"$result_path\" 2>/dev/null | tail -n 1)\n    if [ -n \"$notification_id\" ]; then\n      printf '%s' \"$notification_id\" > {notification_id_path}\n      exit 0\n    fi\n    sleep 0.1\n  done\n) &\nid_watcher_pid=$!\nwait \"$notifier_pid\"\nkill \"$id_watcher_pid\" 2>/dev/null\nwait \"$id_watcher_pid\" 2>/dev/null\nid_watcher_pid=\nnotifier_status=$(cat \"$status_path\" 2>/dev/null || printf '1')\nresult=$(cat \"$result_path\")\nrm -f \"$result_path\" \"$status_path\" {notification_id_path}\n",
+        notification_id_path = notification_id_path_q,
+        result_template = result_template_q,
+        status_template = status_template_q,
+        notifier = notifier_q,
+        title = title_q,
+        body = body_q,
+    ));
+
+    match debug_log_path {
+        Some(log_path) => {
+            let log_q = shell_quote(log_path.to_string_lossy().as_ref());
+            script.push_str(&format!(
+                "printf '%s notify-send status=%s result=%s\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" \"$notifier_status\" \"$result\" >> {log} 2>&1\n",
+                log = log_q,
+            ));
+            script.push_str("if [ \"$notifier_status\" -ne 0 ]; then\n");
+            script.push_str("    exit \"$notifier_status\"\n");
+            script.push_str("fi\n");
+            script.push_str("status=0\n");
+            script.push_str("case \"$result\" in\n");
+            script.push_str(&format!(
+                "  *focus*)\n{sway_focus}    {herdr} agent focus {pane} >> {log} 2>&1\n    status=$?\n    printf '%s focus exited %s\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" \"$status\" >> {log} 2>&1\n    ;;\n",
+                sway_focus = sway_focus_script(con_q.as_str(), Some(log_q.as_str())),
+                herdr = herdr_q,
+                pane = pane_q,
+                log = log_q,
+            ));
+            script.push_str("esac\n");
+            script.push_str("exit \"$status\"\n");
+        }
+        None => {
+            script.push_str("if [ \"$notifier_status\" -ne 0 ]; then\n");
+            script.push_str("    exit \"$notifier_status\"\n");
+            script.push_str("fi\n");
+            script.push_str("case \"$result\" in\n");
+            script.push_str(&format!(
+                "  *focus*)\n{sway_focus}    exec {herdr} agent focus {pane}\n    ;;\n",
+                sway_focus = sway_focus_script(con_q.as_str(), None),
+                herdr = herdr_q,
+                pane = pane_q,
+            ));
+            script.push_str("esac\n");
+        }
+    }
+
+    script
+}
+
+fn sway_focus_script(con_q: &str, log_q: Option<&str>) -> String {
+    match log_q {
+        Some(log_q) => format!(
+            "    if [ -n {con} ]; then\n      run_host swaymsg \"[con_id=$(printf '%s' {con})]\" focus >> {log} 2>&1 || printf '%s sway focus unavailable for con_id=%s\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" {con} >> {log} 2>&1\n    else\n      printf '%s sway focus unavailable: no cached container id\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" >> {log} 2>&1\n    fi\n",
+            con = con_q,
+            log = log_q,
+        ),
+        None => format!(
+            "    if [ -n {con} ]; then\n      run_host swaymsg \"[con_id=$(printf '%s' {con})]\" focus >/dev/null 2>&1 || printf '%s\\n' 'herdr-focus-notify: sway focus unavailable' >&2\n    else\n      printf '%s\\n' 'herdr-focus-notify: sway focus unavailable: no cached container id' >&2\n    fi\n",
+            con = con_q,
+        ),
+    }
 }
 
 fn alerter_focus_script(
@@ -250,10 +363,12 @@ mod tests {
             group: "g".to_string(),
             app_icon: None,
         };
-        let script = focus_script_content(
+        let script = alerter_focus_script(
             &notification,
             "/tmp/herdr bin",
             "/opt/homebrew/bin/alerter",
+            3600,
+            None,
             None,
             Some(Path::new("/tmp/focus clicks.log")),
         );
@@ -267,10 +382,12 @@ mod tests {
 
     #[test]
     fn alerter_script_invokes_alerter_and_runs_focus_on_click() {
-        let script = focus_script_content(
+        let script = alerter_focus_script(
             &sample_notification(),
             "/usr/local/bin/herdr",
             "/opt/homebrew/bin/alerter",
+            3600,
+            None,
             None,
             None,
         );
@@ -394,5 +511,38 @@ mod tests {
             activation_command_from("/Applications/kitty.app".to_string()),
             "open '/Applications/kitty.app'".to_string()
         );
+    }
+
+    #[test]
+    fn linux_script_invokes_notify_send_and_focuses_sway_container() {
+        let script = linux_focus_script(
+            &sample_notification(),
+            "/var/home/sungsik/.local/bin/herdr",
+            "/usr/bin/notify-send",
+            Some("123"),
+            None,
+        );
+
+        assert!(script.contains("run_host '/usr/bin/notify-send' --print-id -A focus=Focus --wait"));
+        assert!(script.contains("printf '%s' \"$notification_id\" >"));
+        assert!(script.contains("run_host swaymsg \"[con_id=$(printf '%s' '123')]\" focus"));
+        assert!(script.contains("exec '/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3'"));
+        assert!(!script.contains("app_id=kitty"));
+    }
+
+    #[test]
+    fn linux_debug_script_logs_missing_sway_container_and_still_focuses_pane() {
+        let script = linux_focus_script(
+            &sample_notification(),
+            "/var/home/sungsik/.local/bin/herdr",
+            "notify-send",
+            None,
+            Some(Path::new("/tmp/focus-click.log")),
+        );
+
+        assert!(script.contains("notify-send status=%s result=%s"));
+        assert!(script.contains("sway focus unavailable: no cached container id"));
+        assert!(script.contains("'notify-send' --print-id -A focus=Focus --wait"));
+        assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3' >> '/tmp/focus-click.log' 2>&1"));
     }
 }

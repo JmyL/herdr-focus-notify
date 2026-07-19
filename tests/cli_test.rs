@@ -102,6 +102,7 @@ fn focus_event_removes_notification_for_foreground_terminal() {
             r#"{"event":"pane.focused","data":{"pane_id":"w1:p2"}}"#,
         )
         .env("HERDR_FOCUS_NOTIFY_ACTIVATE_APP", "Test Terminal")
+        .env("HERDR_FOCUS_NOTIFY_NOTIFIER_BACKEND", "macos")
         .env("HERDR_FOCUS_NOTIFY_NOTIFIER", &notifier)
         .env("HERDR_PLUGIN_STATE_DIR", temp_dir.join("state"))
         .env("NOTIFIER_LOG", &notifier_log)
@@ -163,6 +164,7 @@ fn visible_focused_pane_removes_its_pending_notification() {
         .arg("--test")
         .env("HERDR_BIN_PATH", &herdr)
         .env("HERDR_FOCUS_NOTIFY_ACTIVATE_APP", "Test Terminal")
+        .env("HERDR_FOCUS_NOTIFY_NOTIFIER_BACKEND", "macos")
         .env("HERDR_FOCUS_NOTIFY_NOTIFIER", &notifier)
         .env("HERDR_PLUGIN_STATE_DIR", temp_dir.join("state"))
         .env("FRONTMOST_STATE", &frontmost_state)
@@ -234,6 +236,7 @@ fn test_mode_notifies_even_when_pane_is_visible_and_status_filtered() {
         .env("HERDR_FOCUS_NOTIFY_STATUSES", "done")
         .env("HERDR_BIN_PATH", &herdr)
         .env("HERDR_FOCUS_NOTIFY_ACTIVATE_APP", "Test Terminal")
+        .env("HERDR_FOCUS_NOTIFY_NOTIFIER_BACKEND", "macos")
         .env("HERDR_FOCUS_NOTIFY_NOTIFIER", &notifier)
         .env("HERDR_PLUGIN_STATE_DIR", temp_dir.join("state"))
         .env("NOTIFIER_LOG", &notifier_log)
@@ -298,6 +301,7 @@ fn unfocused_pane_does_not_start_a_visibility_monitor() {
         )
         .env("HERDR_BIN_PATH", &herdr)
         .env("HERDR_FOCUS_NOTIFY_ACTIVATE_APP", "Test Terminal")
+        .env("HERDR_FOCUS_NOTIFY_NOTIFIER_BACKEND", "macos")
         .env("HERDR_FOCUS_NOTIFY_NOTIFIER", &notifier)
         .env("HERDR_PLUGIN_STATE_DIR", temp_dir.join("state"))
         .env("FRONTMOST_STATE", &frontmost_state)
@@ -321,6 +325,55 @@ fn unfocused_pane_does_not_start_a_visibility_monitor() {
 
     let notifier_output = fs::read_to_string(&notifier_log).unwrap_or_default();
     assert!(!notifier_output.contains("--remove\nherdr-w1-p2\n"));
+    fs::remove_dir_all(temp_dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn linux_focus_event_caches_current_sway_container() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "herdr-focus-notify-test-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let swaymsg = temp_dir.join("swaymsg");
+    write_executable(
+        &swaymsg,
+        "#!/bin/sh\nprintf '%s\\n' '{\"id\":1,\"focused\":false,\"nodes\":[{\"id\":77,\"focused\":true,\"nodes\":[]}],\"floating_nodes\":[]}'\n",
+    );
+
+    let notify_send = temp_dir.join("notify-send");
+    write_executable(&notify_send, "#!/bin/sh\nexit 0\n");
+
+    let path = format!(
+        "{}:{}",
+        temp_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let state_dir = temp_dir.join("state");
+    let output = binary()
+        .env("HERDR_PLUGIN_EVENT", "pane.focused")
+        .env(
+            "HERDR_PLUGIN_EVENT_JSON",
+            r#"{"event":"pane.focused","data":{"pane_id":"w1:p2"}}"#,
+        )
+        .env("HERDR_FOCUS_NOTIFY_NOTIFIER_BACKEND", "linux")
+        .env("HERDR_FOCUS_NOTIFY_NOTIFIER", &notify_send)
+        .env("HERDR_PLUGIN_STATE_DIR", &state_dir)
+        .env("PATH", path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        fs::read_to_string(state_dir.join("sway-containers").join("herdr-w1-p2")).unwrap(),
+        "77"
+    );
     fs::remove_dir_all(temp_dir).unwrap();
 }
 
