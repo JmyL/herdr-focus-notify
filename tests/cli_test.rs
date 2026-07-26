@@ -378,6 +378,74 @@ fn linux_focus_event_caches_current_sway_container() {
 }
 
 #[cfg(unix)]
+#[test]
+fn linux_agent_status_event_does_not_overwrite_cached_sway_container() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "herdr-focus-notify-test-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let swaymsg = temp_dir.join("swaymsg");
+    write_executable(
+        &swaymsg,
+        r#"#!/bin/sh
+printf '%s\n' '{"id":1,"focused":false,"nodes":[{"id":88,"focused":true,"nodes":[]}],"floating_nodes":[]}'
+"#,
+    );
+
+    let notify_send = temp_dir.join("notify-send");
+    write_executable(
+        &notify_send,
+        "#!/bin/sh
+printf '%s\n' 123
+",
+    );
+
+    let herdr = temp_dir.join("herdr");
+    write_executable(
+        &herdr,
+        r#"#!/bin/sh
+printf '%s\n' '{"result":{"agents":[{"focused":false,"pane_id":"w1:p2"}]}}'
+"#,
+    );
+
+    let path = format!(
+        "{}:{}",
+        temp_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let state_dir = temp_dir.join("state");
+    fs::create_dir_all(state_dir.join("sway-containers")).unwrap();
+    fs::write(state_dir.join("sway-containers").join("herdr-w1-p2"), "77").unwrap();
+
+    let output = binary()
+        .env("HERDR_BIN_PATH", &herdr)
+        .env("HERDR_PLUGIN_EVENT", "pane.agent_status_changed")
+        .env(
+            "HERDR_PLUGIN_EVENT_JSON",
+            r#"{"event":"pane.agent_status_changed","data":{"pane_id":"w1:p2","workspace_id":"w1","agent_status":"done","agent":"codex","title":"Finished"}}"#,
+        )
+        .env("HERDR_FOCUS_NOTIFY_NOTIFIER_BACKEND", "linux")
+        .env("HERDR_FOCUS_NOTIFY_NOTIFIER", &notify_send)
+        .env("HERDR_PLUGIN_STATE_DIR", &state_dir)
+        .env("PATH", path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        fs::read_to_string(state_dir.join("sway-containers").join("herdr-w1-p2")).unwrap(),
+        "77"
+    );
+    fs::remove_dir_all(temp_dir).unwrap();
+}
+
+#[cfg(unix)]
 fn write_executable(path: &Path, content: &str) {
     fs::write(path, content).unwrap();
     let mut permissions = fs::metadata(path).unwrap().permissions();

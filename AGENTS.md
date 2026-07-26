@@ -2,7 +2,7 @@
 
 ## Project Type
 
-A Rust CLI binary that runs as a **Herdr plugin** on macOS. It listens for Herdr's `pane.agent_status_changed` event and emits clickable macOS desktop notifications via `alerter`. Clicking a notification focuses the matching Herdr agent pane.
+A Rust CLI binary that runs as a **Herdr plugin** on macOS and Linux/Sway. It listens for Herdr's `pane.agent_status_changed` and `pane.focused` events, then emits clickable desktop notifications via `alerter` on macOS or `notify-send`/Mako on Linux. Clicking a notification focuses the matching Herdr agent pane.
 
 The plugin manifest is in [`herdr-plugin.toml`](herdr-plugin.toml). The binary is built by Herdr itself using the command declared in that manifest.
 
@@ -45,17 +45,17 @@ There are no submodules, no external crates beyond serde/serde_json, and no buil
    - `--help` and `--version` print to stdout before plugin setup.
 3. **Notification decision**:
    - Only `blocked` and `done` statuses can produce notifications (they are the ones that need user action); `HERDR_FOCUS_NOTIFY_STATUSES` can only narrow that set, never extend it.
-   - The notification is skipped if the target pane is already focused **and** the frontmost macOS application belongs to the same bundle ID as the configured `ACTIVATE_APP` (see `should_skip_from_focus_and_bundles`). If either check fails, the plugin sends the notification to avoid missing a state change.
+   - On macOS, the notification is skipped if the target pane is already focused **and** the frontmost application belongs to the same bundle ID as the configured `ACTIVATE_APP`. On Linux, focused panes are skipped based on `herdr agent list` and Sway container IDs are cached from `pane.focused` events.
    - Recognized agent names are matched to bundled local PNG icons and passed to `alerter` with `--app-icon`.
 4. **Binary resolution**:
    - `herdr` is resolved from `HERDR_BIN_PATH`, then `PATH`, then hard-coded candidates (`~/.local/bin/herdr`, `/opt/homebrew/bin/herdr`, `/usr/local/bin/herdr`), defaulting to `"herdr"`.
-   - The notifier backend is resolved from `HERDR_FOCUS_NOTIFY_NOTIFIER`, then `PATH`, then hard-coded candidates for `alerter`.
+   - The notifier backend is resolved from `HERDR_FOCUS_NOTIFY_NOTIFIER`, then `PATH`, then hard-coded candidates for `alerter` on macOS or `notify-send` on Linux.
 5. **Focus script generation**:
    - A shell script is written to `HERDR_PLUGIN_STATE_DIR` (falling back to `$TMPDIR/herdr-focus-notify`).
    - The script name is a hash of the notification fields plus config, so repeated identical events reuse the same script path.
    - The script is made executable with mode `0o700`.
 6. **Notification delivery**:
-   - Normal plugin events spawn the script detached via `nohup sh ... &`. The script itself calls `alerter`, then runs `herdr agent focus <pane>` if the user clicks the notification.
+   - Normal plugin events spawn the script detached via `nohup sh ... &`. The script itself calls the platform notifier, then runs the configured app/Sway focus step and `herdr agent focus <pane>` if the user clicks the notification.
    - `--test` runs the generated script in the foreground so notifier failures surface through stderr and a non-zero exit code.
 
 ## Configuration
@@ -68,8 +68,8 @@ Key variables observed in code:
 |---|---|
 | `HERDR_FOCUS_NOTIFY_ENABLED` | `0`/`false`/`no`/`off` disables the plugin. |
 | `HERDR_FOCUS_NOTIFY_STATUSES` | Comma-separated subset of `blocked,done` that triggers notifications. Default: `blocked,done`. |
-| `HERDR_FOCUS_NOTIFY_NOTIFIER` | Path to the notifier backend. Defaults to auto-detected `alerter`. |
-| `HERDR_FOCUS_NOTIFY_ACTIVATE_APP` | Terminal app name (e.g. `kitty`) or `.app` path (e.g. `/Applications/kitty.app`) to activate on click and to resolve a bundle ID for skip detection. |
+| `HERDR_FOCUS_NOTIFY_NOTIFIER` | Path to the notifier backend. Defaults to auto-detected `alerter` on macOS or `notify-send` on Linux. |
+| `HERDR_FOCUS_NOTIFY_ACTIVATE_APP` | macOS terminal app name (e.g. `kitty`) or `.app` path (e.g. `/Applications/kitty.app`) to activate on click and to resolve a bundle ID for skip detection. |
 | `HERDR_FOCUS_NOTIFY_TIMEOUT` | Alerter auto-dismiss timeout in seconds; `0` disables auto-dismiss. Default: `3600`. |
 | `HERDR_FOCUS_NOTIFY_DEBUG` | `1`/`true`/`yes`/`on` enables stderr diagnostics and a `focus-click.log` in the state directory. |
 
@@ -95,7 +95,7 @@ Bundled agent icons are extracted from `@lobehub/icons-static-png` and attribute
 
 ## Important Gotchas
 
-- **macOS only**: The plugin manifest declares `platforms = ["macos"]`. The binary uses AppleScript (`osascript`) and macOS-specific app/bundle APIs; it will not behave correctly on other platforms.
+- **Platform split**: macOS uses `alerter`, AppleScript bundle checks, and optional app activation. Linux uses `notify-send`/Mako plus `swaymsg`; keep platform-specific behavior behind `is_linux_notifier()` or equivalent checks.
 - **No-event quiet path**: A normal plugin invocation without `HERDR_PLUGIN_EVENT_JSON` exits quietly with `0`. Real configuration, parsing, script, and notifier errors should surface through stderr and non-zero exit codes.
 - **Skip logic is conservative**: A notification is only suppressed when the plugin can *confirm* the pane is focused and the frontmost app matches. Any ambiguity (missing bundle ID, AppleScript failure, missing `ACTIVATE_APP`) results in a notification being sent.
 - **State directory hygiene**: Generated scripts are keyed by a hash of notification content and config. They are not automatically cleaned up; over time the state directory may accumulate scripts.
