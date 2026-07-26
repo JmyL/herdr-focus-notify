@@ -67,10 +67,10 @@ fn remove_linux_notification(pane_id: &str) -> io::Result<()> {
         return Ok(());
     };
 
-    let closer = find_executable("swaync-client", swaync_candidate_paths())
-        .unwrap_or_else(|| "swaync-client".to_string());
+    let closer = find_executable("makoctl", makoctl_candidate_paths())
+        .unwrap_or_else(|| "makoctl".to_string());
     let mut command = host_command(&closer);
-    command.arg("--close").arg(notification_id);
+    command.arg("dismiss").arg("-n").arg(notification_id);
 
     match command.status() {
         Ok(status) if status.success() => Ok(()),
@@ -99,10 +99,10 @@ fn notify_send_candidate_paths() -> Vec<PathBuf> {
     ]
 }
 
-fn swaync_candidate_paths() -> Vec<PathBuf> {
+fn makoctl_candidate_paths() -> Vec<PathBuf> {
     vec![
-        PathBuf::from("/usr/bin/swaync-client"),
-        PathBuf::from("/usr/local/bin/swaync-client"),
+        PathBuf::from("/usr/bin/makoctl"),
+        PathBuf::from("/usr/local/bin/makoctl"),
     ]
 }
 

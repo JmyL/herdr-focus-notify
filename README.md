@@ -10,10 +10,10 @@ It is designed to notify you only when the change is easy to miss: when Herdr is
 
 ### 1. Install the requirements
 
-- macOS, or Linux with Sway and swaync
+- macOS, or Linux with Sway and mako
 - Herdr `0.7.3` or later
 - macOS: [alerter](https://github.com/vjeantet/alerter), which displays the clickable notification
-- Linux/Sway: `notify-send` with action support, `swaync-client`, `swaymsg`, and `flatpak-spawn` when running from a toolbox/container
+- Linux/Sway: `notify-send` with action support, `makoctl`, `swaymsg`, and `flatpak-spawn` when running from a toolbox/container
 
 Install alerter:
 
@@ -21,7 +21,7 @@ Install alerter:
 brew install vjeantet/tap/alerter
 ```
 
-On Linux/Sway, install the matching distro packages for `libnotify`, `swaync`, `sway`, and `flatpak-spawn`.
+On Linux/Sway, install the matching distro packages for `libnotify`, `mako`, `sway`, and `flatpak-spawn`.
 
 ### 2. Install the plugin
 

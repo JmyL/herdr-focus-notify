@@ -10,10 +10,10 @@
 
 ### 1. 安装前提条件
 
-- macOS，或带有 Sway 和 swaync 的 Linux
+- macOS，或带有 Sway 和 mako 的 Linux
 - Herdr `0.7.3` 或更高版本
 - macOS：[alerter](https://github.com/vjeantet/alerter)，用于显示可点击通知
-- Linux/Sway：支持 action 的 `notify-send`、`swaync-client`、`swaymsg`，以及从 toolbox/container 运行时需要的 `flatpak-spawn`
+- Linux/Sway：支持 action 的 `notify-send`、`makoctl`、`swaymsg`，以及从 toolbox/container 运行时需要的 `flatpak-spawn`
 
 安装 alerter：
 
