@@ -12,6 +12,7 @@ struct PluginEvent {
 #[derive(Debug, Deserialize)]
 struct EventData {
     pane_id: Option<String>,
+    workspace_id: Option<String>,
     agent_status: Option<String>,
     agent: Option<String>,
     display_agent: Option<String>,
@@ -67,6 +68,7 @@ pub(crate) fn notification_from_event_json(
 
     Ok(Some(FocusNotification {
         pane_id,
+        workspace_id: first_non_empty([data.workspace_id.as_deref()]).map(str::to_string),
         status,
         title,
         body,
@@ -137,6 +139,7 @@ mod tests {
         let notification = notification_from_event_json(json).unwrap().unwrap();
 
         assert_eq!(notification.pane_id, "w1:p3");
+        assert_eq!(notification.workspace_id, Some("herdr".to_string()));
         assert_eq!(notification.status, "blocked");
         assert_eq!(notification.title, "Codex needs attention: Needs an answer");
         assert_eq!(notification.body, "Implement plugin");
@@ -162,6 +165,7 @@ mod tests {
         let notification = notification_from_event_json(json).unwrap().unwrap();
 
         assert_eq!(notification.status, "done");
+        assert_eq!(notification.workspace_id, None);
         assert_eq!(notification.title, "Codex finished");
         assert_eq!(notification.body, "Implement plugin");
         assert!(notification.app_icon.is_some());

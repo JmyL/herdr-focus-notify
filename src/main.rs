@@ -119,6 +119,12 @@ fn run() -> Result<(), String> {
     reset_notification_clearance(&notification.pane_id)
         .map_err(|err| format!("failed to reset notification clearance: {err}"))?;
 
+    if action != CliAction::Test {
+        if let Err(err) = cache_current_sway_container_for_pane(&notification.pane_id) {
+            eprintln!("herdr-focus-notify: {err}");
+        }
+    }
+
     let notifier_bin = resolve_notifier_bin()?;
     let script_path = write_focus_script(
         &notification,
