@@ -54,7 +54,7 @@ HERDR_FOCUS_NOTIFY_ACTIVATE_APP=kitty
 
 Use your terminal app's name, such as `kitty`, or an absolute `.app` path, such as `/Applications/kitty.app`.
 
-This lets the macOS backend activate the terminal when you click a notification and reliably recognise when you have seen the relevant pane. Linux/Sway does not use `ACTIVATE_APP`; it caches the focused Sway container ID on `pane.focused` events and focuses that exact container before running Herdr's pane focus command.
+This lets the macOS backend activate the terminal when you click a notification and reliably recognise when you have seen the relevant pane. Linux/Sway does not use `ACTIVATE_APP`; it caches the focused Sway container ID and focuses that exact container before switching Herdr to the notification's workspace and pane.
 
 The notifier path is usually found automatically. Set `HERDR_FOCUS_NOTIFY_NOTIFIER` only when auto-detection fails.
 
@@ -69,9 +69,9 @@ By default, `blocked` and `done` status changes can produce a notification. On m
 | Herdr is frontmost and the matching pane is focused | Skipped |
 | The focused app cannot be determined | Sent, to avoid missing a change |
 
-Clicking a notification activates the configured terminal app, then runs `herdr agent focus <pane>`.
+Clicking a macOS notification activates the configured terminal app, then runs `herdr agent focus <pane>`.
 
-On Linux/Sway, clicking a notification runs `swaymsg '[con_id=<cached-id>]' focus`, then `herdr agent focus <pane>`. If Sway focusing is unavailable, the script logs a warning and still runs the Herdr focus command.
+On Linux/Sway, clicking the notification body/default action runs `swaymsg '[con_id=<cached-id>]' focus`, then `herdr workspace focus <workspace>` when the event includes a workspace, then `herdr agent focus <pane>`. If Sway focusing or workspace focusing is unavailable, the script logs a warning and still runs the Herdr pane focus command.
 
 Without `ACTIVATE_APP`, focusing still works, but the plugin cannot reliably detect that you have already seen a pane. It may therefore send extra notifications.
 

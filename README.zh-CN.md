@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-`herdr-focus-notify` 是一个 macOS Herdr 插件。当 agent 进入 `blocked` 或 `done` 状态时，它会发送可点击的桌面通知。点击后会聚焦到对应的 Herdr pane。
+`herdr-focus-notify` 是一个 macOS 和 Linux/Sway Herdr 插件。当 agent 进入 `blocked` 或 `done` 状态时，它会发送可点击的桌面通知。点击后会聚焦到对应的 Herdr workspace 和 pane。
 
 它只在状态变化容易被错过时提醒你：Herdr 不在前台，或你正在查看另一个 pane。
 
@@ -10,9 +10,10 @@
 
 ### 1. 安装前提条件
 
-- macOS
+- macOS，或带有 Sway 和 swaync 的 Linux
 - Herdr `0.7.3` 或更高版本
-- [alerter](https://github.com/vjeantet/alerter)：用于显示可点击通知
+- macOS：[alerter](https://github.com/vjeantet/alerter)，用于显示可点击通知
+- Linux/Sway：支持 action 的 `notify-send`、`swaync-client`、`swaymsg`，以及从 toolbox/container 运行时需要的 `flatpak-spawn`
 
 安装 alerter：
 
@@ -64,7 +65,11 @@ HERDR_FOCUS_NOTIFY_ACTIVATE_APP=kitty
 | Herdr 在前台，且焦点就是对应 pane | 跳过 |
 | 无法确定前台 App | 发送，避免遗漏状态变化 |
 
-点击通知后，插件会激活配置的终端 App，然后执行 `herdr agent focus <pane>`。未配置 `ACTIVATE_APP` 时，聚焦仍能工作，但插件无法可靠判断你是否已查看 pane，因此可能会多发通知。
+点击 macOS 通知后，插件会激活配置的终端 App，然后执行 `herdr agent focus <pane>`。
+
+在 Linux/Sway 上，点击通知正文/default action 后，插件会执行 `swaymsg '[con_id=<cached-id>]' focus`，再在事件包含 workspace 时执行 `herdr workspace focus <workspace>`，最后执行 `herdr agent focus <pane>`。如果 Sway 或 workspace 聚焦不可用，脚本会记录警告并继续执行 Herdr pane 聚焦命令。
+
+未配置 `ACTIVATE_APP` 时，聚焦仍能工作，但插件无法可靠判断你是否已查看 pane，因此可能会多发通知。
 
 配置的终端 App 在前台时，你在 Herdr 中手动聚焦对应 pane 后，待处理通知会被移除。如果通知到达时 pane 已经是 active，切回该终端 App 后，通知会在数秒内移除。
 

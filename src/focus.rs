@@ -38,6 +38,7 @@ pub(crate) fn test_notification(herdr_bin: &str) -> FocusNotification {
     let pane_id = focused_pane_id(herdr_bin).unwrap_or_else(|| "test-pane".to_string());
     FocusNotification {
         pane_id: pane_id.clone(),
+        workspace_id: None,
         status: "blocked".to_string(),
         title: "Herdr Focus Notify test".to_string(),
         body: format!("Click to run: {herdr_bin} agent focus {pane_id}"),

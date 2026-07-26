@@ -30,6 +30,7 @@ pub(crate) fn write_focus_script(
     notification.body.hash(&mut hasher);
     notification.group.hash(&mut hasher);
     notification.app_icon.hash(&mut hasher);
+    notification.workspace_id.hash(&mut hasher);
     herdr_bin.hash(&mut hasher);
     notifier_bin.hash(&mut hasher);
     monitor_visibility.hash(&mut hasher);
@@ -99,6 +100,7 @@ fn linux_focus_script(
     let title_q = shell_quote(&notification.title);
     let body_q = shell_quote(&notification.body);
     let pane_q = shell_quote(&notification.pane_id);
+    let workspace_q = notification.workspace_id.as_ref().map(|id| shell_quote(id));
     let herdr_q = shell_quote(herdr_bin);
     let notifier_q = shell_quote(notifier_bin);
     let con_q = shell_quote(sway_container_id.unwrap_or_default());
@@ -155,8 +157,13 @@ fn linux_focus_script(
             script.push_str("status=0\n");
             script.push_str("case \"$result\" in\n");
             script.push_str(&format!(
-                "  *default*)\n{sway_focus}    {herdr} agent focus {pane} >> {log} 2>&1\n    status=$?\n    printf '%s focus exited %s\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" \"$status\" >> {log} 2>&1\n    ;;\n",
+                "  *default*)\n{sway_focus}{workspace_focus}    {herdr} agent focus {pane} >> {log} 2>&1\n    status=$?\n    printf '%s focus exited %s\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" \"$status\" >> {log} 2>&1\n    ;;\n",
                 sway_focus = sway_focus_script(con_q.as_str(), Some(log_q.as_str())),
+                workspace_focus = workspace_focus_script(
+                    herdr_q.as_str(),
+                    workspace_q.as_deref(),
+                    Some(log_q.as_str())
+                ),
                 herdr = herdr_q,
                 pane = pane_q,
                 log = log_q,
@@ -170,8 +177,10 @@ fn linux_focus_script(
             script.push_str("fi\n");
             script.push_str("case \"$result\" in\n");
             script.push_str(&format!(
-                "  *default*)\n{sway_focus}    exec {herdr} agent focus {pane}\n    ;;\n",
+                "  *default*)\n{sway_focus}{workspace_focus}    exec {herdr} agent focus {pane}\n    ;;\n",
                 sway_focus = sway_focus_script(con_q.as_str(), None),
+                workspace_focus =
+                    workspace_focus_script(herdr_q.as_str(), workspace_q.as_deref(), None),
                 herdr = herdr_q,
                 pane = pane_q,
             ));
@@ -180,6 +189,26 @@ fn linux_focus_script(
     }
 
     script
+}
+
+fn workspace_focus_script(herdr_q: &str, workspace_q: Option<&str>, log_q: Option<&str>) -> String {
+    let Some(workspace_q) = workspace_q else {
+        return String::new();
+    };
+
+    match log_q {
+        Some(log_q) => format!(
+            "    {herdr} workspace focus {workspace} >> {log} 2>&1 || printf '%s workspace focus unavailable for workspace=%s\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" {workspace} >> {log} 2>&1\n",
+            herdr = herdr_q,
+            workspace = workspace_q,
+            log = log_q,
+        ),
+        None => format!(
+            "    {herdr} workspace focus {workspace} >/dev/null 2>&1 || printf '%s\\n' 'herdr-focus-notify: workspace focus unavailable' >&2\n",
+            herdr = herdr_q,
+            workspace = workspace_q,
+        ),
+    }
 }
 
 fn sway_focus_script(con_q: &str, log_q: Option<&str>) -> String {
@@ -355,6 +384,7 @@ mod tests {
     fn sample_notification() -> FocusNotification {
         FocusNotification {
             pane_id: "w1:p3".to_string(),
+            workspace_id: Some("w1".to_string()),
             status: "blocked".to_string(),
             title: "Codex needs attention".to_string(),
             body: "Needs an answer".to_string(),
@@ -367,6 +397,7 @@ mod tests {
     fn focus_script_can_include_debug_click_log() {
         let notification = FocusNotification {
             pane_id: "pane ' one".to_string(),
+            workspace_id: None,
             status: "blocked".to_string(),
             title: "x".to_string(),
             body: "y".to_string(),
@@ -558,6 +589,11 @@ mod tests {
             "run_host '/usr/bin/notify-send' --print-id -A default=Focus --wait"
         ));
         assert!(!script.contains("-A focus=Focus"));
+        assert!(script.contains("printf '%s' \"$notification_id\" >"));
+        assert!(script.contains("run_host swaymsg \"[con_id=$(printf '%s' '123')]\" focus"));
+        assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' workspace focus 'w1'"));
+        assert!(script.contains("exec '/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3'"));
+        assert!(!script.contains("app_id=kitty"));
     }
 
     #[test]
@@ -575,6 +611,23 @@ mod tests {
         assert!(script.contains("run_host python3 '/plugin/scripts/linux-notify-wait.py'"));
         assert!(script.contains("*default*)"));
         assert!(!script.contains("*focus*)"));
+        assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' workspace focus 'w1'"));
         assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3' >> '/tmp/focus-click.log' 2>&1"));
+    }
+
+    #[test]
+    fn linux_script_focuses_pane_without_workspace_when_missing() {
+        let mut notification = sample_notification();
+        notification.workspace_id = None;
+        let script = linux_focus_script(
+            &notification,
+            "/var/home/sungsik/.local/bin/herdr",
+            "/usr/bin/notify-send",
+            Some("123"),
+            None,
+        );
+
+        assert!(!script.contains(" workspace focus "));
+        assert!(script.contains("exec '/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3'"));
     }
 }
