@@ -18,7 +18,7 @@ use config::{is_enabled, status_is_enabled};
 use event::{focused_pane_id_from_event_json, notification_from_event_json};
 use executable::resolve_herdr_bin;
 use focus::{
-    cache_current_sway_container_for_pane, notification_decision,
+    cache_current_sway_container_for_pane, enrich_notification_body, notification_decision,
     should_clear_notification_on_focus, test_notification, NotificationDecision,
 };
 use notifier::{remove_notification, resolve_notifier_bin, send_notification};
@@ -62,7 +62,7 @@ fn run() -> Result<(), String> {
 
     let herdr_bin = resolve_herdr_bin();
 
-    let notification = match action {
+    let mut notification = match action {
         CliAction::Test => test_notification(&herdr_bin),
         CliAction::Event => {
             let event_json = match env::var("HERDR_PLUGIN_EVENT_JSON") {
@@ -99,6 +99,10 @@ fn run() -> Result<(), String> {
             unreachable!("handled before notification setup")
         }
     };
+
+    if action == CliAction::Event {
+        enrich_notification_body(&mut notification, &herdr_bin);
+    }
 
     if action != CliAction::Test && !status_is_enabled(&notification.status) {
         return Ok(());

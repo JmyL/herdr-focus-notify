@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::path::Path;
 use std::process::Command;
 
 use crate::config::{activate_app, is_linux_notifier};
@@ -21,6 +22,9 @@ struct AgentListResult {
 struct AgentInfo {
     focused: bool,
     pane_id: Option<String>,
+    cwd: Option<String>,
+    terminal_title: Option<String>,
+    terminal_title_stripped: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +81,84 @@ pub(crate) fn cache_current_sway_container_for_pane(pane_id: &str) -> Result<(),
 
     cache_sway_container_id(pane_id, &con_id)
         .map_err(|err| format!("failed to cache sway container id: {err}"))
+}
+
+/// Prefer `basename(cwd) · terminal_title` from `herdr agent list` when available.
+pub(crate) fn enrich_notification_body(notification: &mut FocusNotification, herdr_bin: &str) {
+    if let Some(body) = agent_context_body(&notification.pane_id, herdr_bin) {
+        notification.body = body;
+    }
+}
+
+fn agent_context_body(pane_id: &str, herdr_bin: &str) -> Option<String> {
+    let output = Command::new(herdr_bin)
+        .arg("agent")
+        .arg("list")
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let json = String::from_utf8(output.stdout).ok()?;
+    agent_context_body_from_agent_list_json(pane_id, &json)
+}
+
+fn agent_context_body_from_agent_list_json(pane_id: &str, json: &str) -> Option<String> {
+    let envelope: AgentListEnvelope = serde_json::from_str(json).ok()?;
+    let agents = envelope.result?.agents;
+    let agent = agents.into_iter().find(|agent| {
+        agent
+            .pane_id
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|id| id == pane_id)
+    })?;
+
+    let project = agent
+        .cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|cwd| {
+            Path::new(cwd)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+                .filter(|name| !name.is_empty())
+        });
+
+    let title = first_non_empty([
+        agent.terminal_title_stripped.as_deref(),
+        agent.terminal_title.as_deref(),
+    ]);
+
+    match (project.as_deref(), title) {
+        (Some(project), Some(title)) => Some(truncate(&format!("{project} · {title}"), 220)),
+        (Some(project), None) => Some(truncate(project, 220)),
+        (None, Some(title)) => Some(truncate(title, 220)),
+        (None, None) => None,
+    }
+}
+
+fn first_non_empty<const N: usize>(values: [Option<&str>; N]) -> Option<&str> {
+    values
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+}
+
+fn truncate(value: &str, max_chars: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+
+    let mut output: String = trimmed.chars().take(max_chars.saturating_sub(3)).collect();
+    output.push_str("...");
+    output
 }
 
 fn pane_is_focused(pane_id: &str, herdr_bin: &str) -> bool {
@@ -331,5 +413,61 @@ mod tests {
             focused_sway_container_id_from_value(&json),
             Some("42".to_string())
         );
+    }
+
+    #[test]
+    fn builds_context_body_from_cwd_and_terminal_title() {
+        let json = r#"{
+            "result": {
+                "agents": [
+                    {
+                        "agent": "cursor",
+                        "focused": false,
+                        "pane_id": "w13:p1",
+                        "cwd": "/home/sungsik/projects/real-fake-peripheral",
+                        "terminal_title": "Hello There",
+                        "terminal_title_stripped": "Hello There"
+                    }
+                ]
+            }
+        }"#;
+
+        assert_eq!(
+            agent_context_body_from_agent_list_json("w13:p1", json),
+            Some("real-fake-peripheral · Hello There".to_string())
+        );
+    }
+
+    #[test]
+    fn builds_context_body_from_cwd_only() {
+        let json = r#"{
+            "result": {
+                "agents": [
+                    {
+                        "focused": false,
+                        "pane_id": "w1:p1",
+                        "cwd": "/tmp/project"
+                    }
+                ]
+            }
+        }"#;
+
+        assert_eq!(
+            agent_context_body_from_agent_list_json("w1:p1", json),
+            Some("project".to_string())
+        );
+    }
+
+    #[test]
+    fn returns_none_when_pane_missing_from_agent_list() {
+        let json = r#"{
+            "result": {
+                "agents": [
+                    {"focused": false, "pane_id": "w1:p1", "cwd": "/tmp/project"}
+                ]
+            }
+        }"#;
+
+        assert_eq!(agent_context_body_from_agent_list_json("w1:p9", json), None);
     }
 }

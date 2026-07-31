@@ -123,7 +123,7 @@ fn linux_focus_script(
         cleared_marker = cleared_marker_q
     ));
     script.push_str(&format!(
-        "mkdir -p \"$(dirname {notification_id_path})\"\nresult_path=$(mktemp {result_template}) || exit 1\nstatus_path=$(mktemp {status_template}) || {{ rm -f \"$result_path\"; exit 1; }}\nid_watcher_pid=\ncleanup() {{\n  [ -z \"$id_watcher_pid\" ] || kill \"$id_watcher_pid\" 2>/dev/null\n  rm -f \"$result_path\" \"$status_path\" {notification_id_path}\n}}\ntrap cleanup EXIT\n(\n  run_host {notifier} --print-id -A focus=Focus --wait {title} {body} > \"$result_path\" 2>/dev/null\n  printf '%s' \"$?\" > \"$status_path\"\n) &\nnotifier_pid=$!\n(\n  while kill -0 \"$notifier_pid\" 2>/dev/null; do\n    notification_id=$(sed -n 's/^\\([0-9][0-9]*\\)$/\\1/p' \"$result_path\" 2>/dev/null | tail -n 1)\n    if [ -n \"$notification_id\" ]; then\n      printf '%s' \"$notification_id\" > {notification_id_path}\n      exit 0\n    fi\n    sleep 0.1\n  done\n) &\nid_watcher_pid=$!\nwait \"$notifier_pid\"\nkill \"$id_watcher_pid\" 2>/dev/null\nwait \"$id_watcher_pid\" 2>/dev/null\nid_watcher_pid=\nnotifier_status=$(cat \"$status_path\" 2>/dev/null || printf '1')\nresult=$(cat \"$result_path\")\nrm -f \"$result_path\" \"$status_path\" {notification_id_path}\n",
+        "mkdir -p \"$(dirname {notification_id_path})\"\nresult_path=$(mktemp {result_template}) || exit 1\nstatus_path=$(mktemp {status_template}) || {{ rm -f \"$result_path\"; exit 1; }}\nid_watcher_pid=\ncleanup() {{\n  [ -z \"$id_watcher_pid\" ] || kill \"$id_watcher_pid\" 2>/dev/null\n  rm -f \"$result_path\" \"$status_path\" {notification_id_path}\n}}\ntrap cleanup EXIT\n(\n  run_host {notifier} --print-id -A default=Focus -A focus=Focus --wait {title} {body} > \"$result_path\" 2>/dev/null\n  printf '%s' \"$?\" > \"$status_path\"\n) &\nnotifier_pid=$!\n(\n  while kill -0 \"$notifier_pid\" 2>/dev/null; do\n    notification_id=$(sed -n 's/^\\([0-9][0-9]*\\)$/\\1/p' \"$result_path\" 2>/dev/null | tail -n 1)\n    if [ -n \"$notification_id\" ]; then\n      printf '%s' \"$notification_id\" > {notification_id_path}\n      exit 0\n    fi\n    sleep 0.1\n  done\n) &\nid_watcher_pid=$!\nwait \"$notifier_pid\"\nkill \"$id_watcher_pid\" 2>/dev/null\nwait \"$id_watcher_pid\" 2>/dev/null\nid_watcher_pid=\nnotifier_status=$(cat \"$status_path\" 2>/dev/null || printf '1')\nresult=$(cat \"$result_path\")\nrm -f \"$result_path\" \"$status_path\" {notification_id_path}\n",
         notification_id_path = notification_id_path_q,
         result_template = result_template_q,
         status_template = status_template_q,
@@ -145,7 +145,7 @@ fn linux_focus_script(
             script.push_str("status=0\n");
             script.push_str("case \"$result\" in\n");
             script.push_str(&format!(
-                "  *focus*)\n{sway_focus}    {herdr} agent focus {pane} >> {log} 2>&1\n    status=$?\n    printf '%s focus exited %s\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" \"$status\" >> {log} 2>&1\n    ;;\n",
+                "  *default*|*focus*)\n{sway_focus}    {herdr} agent focus {pane} >> {log} 2>&1\n    status=$?\n    printf '%s focus exited %s\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" \"$status\" >> {log} 2>&1\n    ;;\n",
                 sway_focus = sway_focus_script(con_q.as_str(), Some(log_q.as_str())),
                 herdr = herdr_q,
                 pane = pane_q,
@@ -160,7 +160,7 @@ fn linux_focus_script(
             script.push_str("fi\n");
             script.push_str("case \"$result\" in\n");
             script.push_str(&format!(
-                "  *focus*)\n{sway_focus}    exec {herdr} agent focus {pane}\n    ;;\n",
+                "  *default*|*focus*)\n{sway_focus}    exec {herdr} agent focus {pane}\n    ;;\n",
                 sway_focus = sway_focus_script(con_q.as_str(), None),
                 herdr = herdr_q,
                 pane = pane_q,
@@ -523,9 +523,12 @@ mod tests {
             None,
         );
 
-        assert!(script.contains("run_host '/usr/bin/notify-send' --print-id -A focus=Focus --wait"));
+        assert!(script.contains(
+            "run_host '/usr/bin/notify-send' --print-id -A default=Focus -A focus=Focus --wait"
+        ));
         assert!(script.contains("printf '%s' \"$notification_id\" >"));
         assert!(script.contains("run_host swaymsg \"[con_id=$(printf '%s' '123')]\" focus"));
+        assert!(script.contains("*default*|*focus*)"));
         assert!(script.contains("exec '/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3'"));
         assert!(!script.contains("app_id=kitty"));
     }
@@ -542,7 +545,10 @@ mod tests {
 
         assert!(script.contains("notify-send status=%s result=%s"));
         assert!(script.contains("sway focus unavailable: no cached container id"));
-        assert!(script.contains("'notify-send' --print-id -A focus=Focus --wait"));
+        assert!(script.contains(
+            "'notify-send' --print-id -A default=Focus -A focus=Focus --wait"
+        ));
+        assert!(script.contains("*default*|*focus*)"));
         assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3' >> '/tmp/focus-click.log' 2>&1"));
     }
 }
