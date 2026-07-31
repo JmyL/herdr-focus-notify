@@ -13,7 +13,7 @@ It is designed to notify you only when the change is easy to miss: when Herdr is
 - macOS, or Linux with Sway and swaync
 - Herdr `0.7.3` or later
 - macOS: [alerter](https://github.com/vjeantet/alerter), which displays the clickable notification
-- Linux/Sway: `notify-send` with action support, `swaync-client`, `swaymsg`, and `flatpak-spawn` when running from a toolbox/container
+- Linux/Sway: `python3` with PyGObject (`python3-gi`), `swaync-client`, `swaymsg`, and `flatpak-spawn` when running from a toolbox/container. Notifications are sent via the bundled `scripts/linux-notify-wait.py` D-Bus helper (libnotify's `notify-send` often drops actions under swaync).
 
 Install alerter:
 
@@ -21,7 +21,7 @@ Install alerter:
 brew install vjeantet/tap/alerter
 ```
 
-On Linux/Sway, install the matching distro packages for `libnotify`, `swaync`, `sway`, and `flatpak-spawn`.
+On Linux/Sway, install the matching distro packages for `python3-gi` (or PyGObject), `swaync`, `sway`, and `flatpak-spawn`.
 
 ### 2. Install the plugin
 
@@ -87,7 +87,7 @@ There are supported settings, but you normally need only `HERDR_FOCUS_NOTIFY_ACT
 - `HERDR_FOCUS_NOTIFY_TIMEOUT`: auto-dismiss time in seconds; default `3600`, or `0` to keep notifications open.
 - `HERDR_FOCUS_NOTIFY_ENABLED=0`: pause notifications without removing the plugin.
 - `HERDR_FOCUS_NOTIFY_NOTIFIER_BACKEND`: `linux` or `macos`; defaults to `linux` on Linux and `macos` elsewhere.
-- `HERDR_FOCUS_NOTIFY_NOTIFIER`: full `notify-send` or `alerter` path when auto-detection fails.
+- `HERDR_FOCUS_NOTIFY_NOTIFIER`: override notifier path. On Linux this defaults to the bundled `scripts/linux-notify-wait.py`; set to a `notify-send` path only for debugging. On macOS, point at `alerter` when auto-detection fails.
 - `HERDR_FOCUS_NOTIFY_DEBUG=1`: enable diagnostics in the plugin logs and `focus-click.log`.
 
 The `.env` file supports `KEY=value`, optional `export KEY=value`, quoted values, and inline comments. Paths in `ACTIVATE_APP` are passed directly to `open`; use an absolute path rather than `~`.

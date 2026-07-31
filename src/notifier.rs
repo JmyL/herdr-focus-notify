@@ -1,3 +1,4 @@
+use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -21,10 +22,13 @@ pub(crate) fn resolve_notifier_bin() -> Result<String, String> {
     }
 
     if is_linux_notifier() {
-        return find_executable("notify-send", notify_send_candidate_paths())
-            .or_else(|| host_command_available("notify-send").then_some("notify-send".to_string()))
+        // Prefer the D-Bus helper: libnotify's notify-send often advertises
+        // "actions" support but still sends an empty actions array, so click
+        // never invokes ActionInvoked under swaync.
+        return resolve_linux_notify_wait_script()
+            .map(|path| path.to_string_lossy().into_owned())
             .ok_or_else(|| {
-                "no notify-send notifier found; install libnotify or set HERDR_FOCUS_NOTIFY_NOTIFIER"
+                "no scripts/linux-notify-wait.py found next to the plugin; reinstall the plugin or set HERDR_FOCUS_NOTIFY_NOTIFIER"
                     .to_string()
             });
     }
@@ -32,6 +36,38 @@ pub(crate) fn resolve_notifier_bin() -> Result<String, String> {
     find_executable("alerter", alerter_candidate_paths()).ok_or_else(|| {
         "no alerter notifier found; install alerter with `brew install vjeantet/tap/alerter` or set HERDR_FOCUS_NOTIFY_NOTIFIER".to_string()
     })
+}
+
+/// Path to the bundled Linux helper that sends actionable notifications over D-Bus.
+pub(crate) fn resolve_linux_notify_wait_script() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(root) = env::var("HERDR_PLUGIN_ROOT") {
+        candidates.push(PathBuf::from(root).join("scripts/linux-notify-wait.py"));
+    }
+
+    if let Ok(exe) = env::current_exe() {
+        // target/release/herdr-focus-notify -> plugin root
+        if let Some(root) = exe
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+        {
+            candidates.push(root.join("scripts/linux-notify-wait.py"));
+        }
+    }
+
+    candidates.push(PathBuf::from("scripts/linux-notify-wait.py"));
+
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+/// True when `notifier_bin` is the bundled D-Bus helper (not notify-send/alerter).
+pub(crate) fn is_linux_dbus_notify_helper(notifier_bin: &str) -> bool {
+    Path::new(notifier_bin)
+        .file_name()
+        .and_then(|name| name.to_str())
+        == Some("linux-notify-wait.py")
 }
 
 pub(crate) fn send_notification(script_path: &Path, foreground: bool) -> io::Result<()> {
@@ -90,13 +126,6 @@ fn alerter_candidate_paths() -> Vec<PathBuf> {
         paths.push(home.join(".local/bin/alerter"));
     }
     paths
-}
-
-fn notify_send_candidate_paths() -> Vec<PathBuf> {
-    vec![
-        PathBuf::from("/usr/bin/notify-send"),
-        PathBuf::from("/usr/local/bin/notify-send"),
-    ]
 }
 
 fn swaync_candidate_paths() -> Vec<PathBuf> {
