@@ -129,10 +129,13 @@ fn alerter_candidate_paths() -> Vec<PathBuf> {
 }
 
 fn swaync_candidate_paths() -> Vec<PathBuf> {
-    vec![
-        PathBuf::from("/usr/bin/swaync-client"),
-        PathBuf::from("/usr/local/bin/swaync-client"),
-    ]
+    let mut paths = Vec::new();
+    if let Some(home) = home_dir() {
+        paths.push(home.join(".local/bin/swaync-client"));
+    }
+    paths.push(PathBuf::from("/usr/bin/swaync-client"));
+    paths.push(PathBuf::from("/usr/local/bin/swaync-client"));
+    paths
 }
 
 pub(crate) fn host_command(command: &str) -> Command {
