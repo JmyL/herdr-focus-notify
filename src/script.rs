@@ -113,7 +113,7 @@ fn linux_focus_script(
     } else {
         // Legacy/override path for HERDR_FOCUS_NOTIFY_NOTIFIER=notify-send (or tests).
         format!(
-            "run_host {notifier} --print-id -A default=Focus -A focus=Focus --wait {title} {body}",
+            "run_host {notifier} --print-id -A default=Focus --wait {title} {body}",
             notifier = notifier_q,
             title = title_q,
             body = body_q
@@ -155,7 +155,7 @@ fn linux_focus_script(
             script.push_str("status=0\n");
             script.push_str("case \"$result\" in\n");
             script.push_str(&format!(
-                "  *default*|*focus*)\n{sway_focus}    {herdr} agent focus {pane} >> {log} 2>&1\n    status=$?\n    printf '%s focus exited %s\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" \"$status\" >> {log} 2>&1\n    ;;\n",
+                "  *default*)\n{sway_focus}    {herdr} agent focus {pane} >> {log} 2>&1\n    status=$?\n    printf '%s focus exited %s\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" \"$status\" >> {log} 2>&1\n    ;;\n",
                 sway_focus = sway_focus_script(con_q.as_str(), Some(log_q.as_str())),
                 herdr = herdr_q,
                 pane = pane_q,
@@ -170,7 +170,7 @@ fn linux_focus_script(
             script.push_str("fi\n");
             script.push_str("case \"$result\" in\n");
             script.push_str(&format!(
-                "  *default*|*focus*)\n{sway_focus}    exec {herdr} agent focus {pane}\n    ;;\n",
+                "  *default*)\n{sway_focus}    exec {herdr} agent focus {pane}\n    ;;\n",
                 sway_focus = sway_focus_script(con_q.as_str(), None),
                 herdr = herdr_q,
                 pane = pane_q,
@@ -538,7 +538,8 @@ mod tests {
         ));
         assert!(script.contains("printf '%s' \"$notification_id\" >"));
         assert!(script.contains("run_host swaymsg \"[con_id=$(printf '%s' '123')]\" focus"));
-        assert!(script.contains("*default*|*focus*)"));
+        assert!(script.contains("*default*)"));
+        assert!(!script.contains("*focus*)"));
         assert!(script.contains("exec '/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3'"));
         assert!(!script.contains("app_id=kitty"));
     }
@@ -554,8 +555,9 @@ mod tests {
         );
 
         assert!(script.contains(
-            "run_host '/usr/bin/notify-send' --print-id -A default=Focus -A focus=Focus --wait"
+            "run_host '/usr/bin/notify-send' --print-id -A default=Focus --wait"
         ));
+        assert!(!script.contains("-A focus=Focus"));
     }
 
     #[test]
@@ -571,7 +573,8 @@ mod tests {
         assert!(script.contains("notifier status=%s result=%s"));
         assert!(script.contains("sway focus unavailable: no cached container id"));
         assert!(script.contains("run_host python3 '/plugin/scripts/linux-notify-wait.py'"));
-        assert!(script.contains("*default*|*focus*)"));
+        assert!(script.contains("*default*)"));
+        assert!(!script.contains("*focus*)"));
         assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3' >> '/tmp/focus-click.log' 2>&1"));
     }
 }

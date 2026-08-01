@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Mimic notify-send --print-id -A default=Focus -A focus=Focus --wait TITLE BODY."""
+"""Mimic notify-send --print-id -A default=Focus --wait TITLE BODY.
+
+Only the special "default" action is registered (body click / swaync -ad).
+A separate labeled "focus" button is intentionally omitted — same behavior,
+and it made it harder to tell whether default-action wiring works.
+"""
 import sys
 
 import gi
@@ -49,7 +54,7 @@ reply = bus.call_sync(
             "",
             title,
             body,
-            ["default", "Focus", "focus", "Focus"],
+            ["default", "Focus"],
             {},
             0,
         ),
