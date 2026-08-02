@@ -103,18 +103,34 @@ fn remove_linux_notification(pane_id: &str) -> io::Result<()> {
         return Ok(());
     };
 
-    let closer = find_executable("swaync-client", swaync_candidate_paths())
-        .unwrap_or_else(|| "swaync-client".to_string());
-    let mut command = host_command(&closer);
-    command.arg("--close").arg(notification_id);
-
-    match command.status() {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(io::Error::other(format!(
-            "notification removal exited with {status}"
-        ))),
-        Err(err) => Err(err),
+    // Prefer swaync (Ubuntu), then mako (Fedora). Either may be absent.
+    if let Some(closer) = find_executable("swaync-client", swaync_candidate_paths()) {
+        let mut command = host_command(&closer);
+        command.arg("--close").arg(&notification_id);
+        return match command.status() {
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) => Err(io::Error::other(format!(
+                "notification removal exited with {status}"
+            ))),
+            Err(err) => Err(err),
+        };
     }
+
+    if let Some(closer) = find_executable("makoctl", makoctl_candidate_paths()) {
+        let mut command = host_command(&closer);
+        command.arg("dismiss").arg("-n").arg(&notification_id);
+        return match command.status() {
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) => Err(io::Error::other(format!(
+                "notification removal exited with {status}"
+            ))),
+            Err(err) => Err(err),
+        };
+    }
+
+    Err(io::Error::other(
+        "no notification closer found; install swaync-client or makoctl",
+    ))
 }
 
 fn alerter_candidate_paths() -> Vec<PathBuf> {
@@ -135,6 +151,16 @@ fn swaync_candidate_paths() -> Vec<PathBuf> {
     }
     paths.push(PathBuf::from("/usr/bin/swaync-client"));
     paths.push(PathBuf::from("/usr/local/bin/swaync-client"));
+    paths
+}
+
+fn makoctl_candidate_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(home) = home_dir() {
+        paths.push(home.join(".local/bin/makoctl"));
+    }
+    paths.push(PathBuf::from("/usr/bin/makoctl"));
+    paths.push(PathBuf::from("/usr/local/bin/makoctl"));
     paths
 }
 
@@ -198,5 +224,14 @@ mod tests {
 
         assert!(paths.contains(&PathBuf::from("/opt/homebrew/bin/alerter")));
         assert!(paths.contains(&PathBuf::from("/usr/local/bin/alerter")));
+    }
+
+    #[test]
+    fn linux_closer_candidates_include_swaync_and_mako() {
+        let swaync = swaync_candidate_paths();
+        let mako = makoctl_candidate_paths();
+
+        assert!(swaync.contains(&PathBuf::from("/usr/bin/swaync-client")));
+        assert!(mako.contains(&PathBuf::from("/usr/bin/makoctl")));
     }
 }
