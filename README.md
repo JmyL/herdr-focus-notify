@@ -10,10 +10,10 @@ It is designed to notify you only when the change is easy to miss: when Herdr is
 
 ### 1. Install the requirements
 
-- macOS, or Linux with Sway and a notification daemon (`swaync` or `mako`)
+- macOS, or Linux with Sway and swaync
 - Herdr `0.7.3` or later
 - macOS: [alerter](https://github.com/vjeantet/alerter), which displays the clickable notification
-- Linux/Sway: `python3` with PyGObject (`python3-gi`), `swaymsg`, either `swaync-client` or `makoctl` for dismiss, and `flatpak-spawn` when running from a toolbox/container. Notifications are sent via the bundled `scripts/linux-notify-wait.py` D-Bus helper (libnotify's `notify-send` often drops actions under AppArmor/swaync).
+- Linux/Sway: `python3` with PyGObject (`python3-gi`), `swaync-client`, `swaymsg`, and `flatpak-spawn` when running from a toolbox/container. Notifications are sent via the bundled `scripts/linux-notify-wait.py` D-Bus helper (libnotify's `notify-send` often drops actions under AppArmor/swaync).
 
 Install alerter:
 
@@ -21,7 +21,7 @@ Install alerter:
 brew install vjeantet/tap/alerter
 ```
 
-On Linux/Sway, install the matching distro packages for `python3-gi` (or PyGObject), `swaync` or `mako`, `sway`, and `flatpak-spawn`.
+On Linux/Sway, install the matching distro packages for `python3-gi` (or PyGObject), `swaync`, `sway`, and `flatpak-spawn`.
 
 ### 2. Install the plugin
 
