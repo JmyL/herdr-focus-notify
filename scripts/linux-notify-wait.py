@@ -56,7 +56,9 @@ reply = bus.call_sync(
             body,
             ["default", "Focus"],
             {},
-            0,
+            # Milliseconds. 0 falls back to swaync's timeout (20s here), which
+            # disappears before agent-done notices are easy to read/click.
+            40000,
         ),
     ),
     GLib.VariantType("(u)"),
