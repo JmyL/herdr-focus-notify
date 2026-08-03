@@ -2,11 +2,14 @@ use serde::Deserialize;
 use std::path::Path;
 use std::process::Command;
 
+use crate::answer_preview::latest_answer_first_line;
 use crate::config::{activate_app, is_linux_notifier};
 use crate::notification::FocusNotification;
 use crate::notifier::host_command;
 use crate::state::{cache_sway_container_id, cached_sway_container_id};
 use crate::util::sanitize_group_id;
+
+const NOTIFICATION_BODY_MAX_CHARS: usize = 120;
 
 #[derive(Debug, Deserialize)]
 struct AgentListEnvelope {
@@ -21,10 +24,17 @@ struct AgentListResult {
 #[derive(Debug, Deserialize)]
 struct AgentInfo {
     focused: bool,
+    agent: Option<String>,
     pane_id: Option<String>,
     cwd: Option<String>,
     terminal_title: Option<String>,
     terminal_title_stripped: Option<String>,
+    agent_session: Option<AgentSession>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentSession {
+    value: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +94,10 @@ pub(crate) fn cache_current_sway_container_for_pane(pane_id: &str) -> Result<(),
         .map_err(|err| format!("failed to cache sway container id: {err}"))
 }
 
-/// Prefer `basename(cwd) · terminal_title` from `herdr agent list` when available.
+/// Prefer `basename(cwd) · preview` from `herdr agent list` when available.
+///
+/// Preview is the first line of the latest Cursor assistant turn when a
+/// transcript exists; otherwise the terminal/session title.
 pub(crate) fn enrich_notification_body(notification: &mut FocusNotification, herdr_bin: &str) {
     if let Some(body) = agent_context_body(&notification.pane_id, herdr_bin) {
         notification.body = body;
@@ -130,15 +143,37 @@ fn agent_context_body_from_agent_list_json(pane_id: &str, json: &str) -> Option<
                 .filter(|name| !name.is_empty())
         });
 
-    let title = first_non_empty([
+    let session_title = first_non_empty([
         agent.terminal_title_stripped.as_deref(),
         agent.terminal_title.as_deref(),
-    ]);
+    ])
+    .map(str::to_string);
 
-    match (project.as_deref(), title) {
-        (Some(project), Some(title)) => Some(truncate(&format!("{project} · {title}"), 220)),
-        (Some(project), None) => Some(truncate(project, 220)),
-        (None, Some(title)) => Some(truncate(title, 220)),
+    let answer_preview = latest_answer_first_line(
+        agent.agent.as_deref(),
+        agent
+            .agent_session
+            .as_ref()
+            .and_then(|session| session.value.as_deref()),
+    );
+
+    compose_notification_body(project.as_deref(), answer_preview.as_deref(), session_title.as_deref())
+}
+
+fn compose_notification_body(
+    project: Option<&str>,
+    answer_preview: Option<&str>,
+    session_title: Option<&str>,
+) -> Option<String> {
+    let preview = first_non_empty([answer_preview, session_title]);
+
+    match (project, preview) {
+        (Some(project), Some(preview)) => Some(truncate(
+            &format!("{project} · {preview}"),
+            NOTIFICATION_BODY_MAX_CHARS,
+        )),
+        (Some(project), None) => Some(truncate(project, NOTIFICATION_BODY_MAX_CHARS)),
+        (None, Some(preview)) => Some(truncate(preview, NOTIFICATION_BODY_MAX_CHARS)),
         (None, None) => None,
     }
 }
@@ -472,6 +507,35 @@ mod tests {
             agent_context_body_from_agent_list_json("w13:p1", json),
             Some("real-fake-peripheral · Hello There".to_string())
         );
+    }
+
+    #[test]
+    fn prefers_answer_preview_over_session_title() {
+        assert_eq!(
+            compose_notification_body(
+                Some("dotfiles"),
+                Some("Latest answer first line."),
+                Some("Session From First Question")
+            ),
+            Some("dotfiles · Latest answer first line.".to_string())
+        );
+    }
+
+    #[test]
+    fn falls_back_to_session_title_without_answer_preview() {
+        assert_eq!(
+            compose_notification_body(Some("dotfiles"), None, Some("Session From First Question")),
+            Some("dotfiles · Session From First Question".to_string())
+        );
+    }
+
+    #[test]
+    fn truncates_notification_body_to_120_chars() {
+        let long = "x".repeat(200);
+        let body = compose_notification_body(Some("proj"), Some(&long), None).unwrap();
+        assert_eq!(body.chars().count(), 120);
+        assert!(body.ends_with("..."));
+        assert!(body.starts_with("proj · "));
     }
 
     #[test]

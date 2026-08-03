@@ -26,6 +26,7 @@ CI runs on `macos-latest` and executes all of the above in order (see [`.github/
 ├── Cargo.toml          # Rust package metadata; minimal dependencies (serde, serde_json)
 ├── herdr-plugin.toml   # Herdr plugin manifest: build command, actions, event subscriptions
 ├── src/main.rs         # Thin CLI/plugin entry point
+├── src/answer_preview.rs # Cursor transcript → latest answer first line
 ├── src/*.rs            # Focused modules for CLI, config, event parsing, focus checks, scripts, and notifier delivery
 ├── assets/icons        # Bundled local agent icons used by alerter --app-icon
 ├── tests/cli_test.rs   # Process-level CLI contract tests
@@ -50,11 +51,15 @@ There are no submodules, no external crates beyond serde/serde_json, and no buil
 4. **Binary resolution**:
    - `herdr` is resolved from `HERDR_BIN_PATH`, then `PATH`, then hard-coded candidates (`~/.local/bin/herdr`, `/opt/homebrew/bin/herdr`, `/usr/local/bin/herdr`), defaulting to `"herdr"`.
    - The notifier backend is resolved from `HERDR_FOCUS_NOTIFY_NOTIFIER`, then `PATH`, then hard-coded candidates for `alerter` on macOS or `notify-send` on Linux.
-5. **Focus script generation**:
+5. **Notification body enrichment**:
+   - After parsing the event, the plugin may replace the body with `{cwd basename} · {preview}` (truncated to 120 chars) from `herdr agent list`.
+   - For Cursor, `preview` prefers the first line of the latest assistant turn from `~/.cursor/projects/**/agent-transcripts/<session>/<session>.jsonl` when present; otherwise it uses `terminal_title`.
+   - Non-Cursor agents keep `terminal_title` (no terminal-scrape heuristics).
+6. **Focus script generation**:
    - A shell script is written to `HERDR_PLUGIN_STATE_DIR` (falling back to `$TMPDIR/herdr-focus-notify`).
    - The script name is a hash of the notification fields plus config, so repeated identical events reuse the same script path.
    - The script is made executable with mode `0o700`.
-6. **Notification delivery**:
+7. **Notification delivery**:
    - Normal plugin events spawn the script detached via `nohup sh ... &`. The script itself calls the platform notifier, then runs the configured app/Sway focus step and `herdr agent focus <pane>` if the user clicks the notification.
    - `--test` runs the generated script in the foreground so notifier failures surface through stderr and a non-zero exit code.
 

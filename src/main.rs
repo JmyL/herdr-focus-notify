@@ -1,3 +1,4 @@
+mod answer_preview;
 mod cli;
 mod config;
 mod event;
