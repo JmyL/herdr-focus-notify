@@ -52,7 +52,8 @@ There are no submodules, no external crates beyond serde/serde_json, and no buil
    - `herdr` is resolved from `HERDR_BIN_PATH`, then `PATH`, then hard-coded candidates (`~/.local/bin/herdr`, `/opt/homebrew/bin/herdr`, `/usr/local/bin/herdr`), defaulting to `"herdr"`.
    - The notifier backend is resolved from `HERDR_FOCUS_NOTIFY_NOTIFIER`, then `PATH`, then hard-coded candidates for `alerter` on macOS or `notify-send` on Linux.
 5. **Notification body enrichment**:
-   - After parsing the event, the plugin may replace the body with `{cwd basename} · {preview}` (truncated to 120 chars) from `herdr agent list`.
+   - After parsing the event, the plugin may replace the body with `{workspace_name} · {preview}` (truncated to 120 chars).
+   - `workspace_name` comes from `herdr workspace get` label after stripping a navigator-style `[^\s]+:\s` prefix (e.g. `project: ree-drive` → `ree-drive`); cwd basename is the fallback.
    - For Cursor, `preview` prefers the first line of the latest assistant turn from `~/.cursor/projects/**/agent-transcripts/<session>/<session>.jsonl` when present; otherwise it uses `terminal_title`.
    - Non-Cursor agents keep `terminal_title` (no terminal-scrape heuristics).
 6. **Focus script generation**:

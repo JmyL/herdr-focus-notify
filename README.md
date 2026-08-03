@@ -62,7 +62,7 @@ The notifier path is usually found automatically. Set `HERDR_FOCUS_NOTIFY_NOTIFI
 
 By default, `blocked` and `done` status changes can produce a notification. On macOS, with a valid `ACTIVATE_APP` configuration, the plugin sends one only when it cannot confirm that you are already looking at that pane.
 
-The notification body is `{project} · {preview}` (truncated to 120 characters). For Cursor, `preview` prefers the first line of the latest assistant turn when a local agent transcript is available; otherwise it falls back to the terminal/session title. Other agents always use the session title.
+The notification body is `{workspace} · {preview}` (truncated to 120 characters). `workspace` is the Herdr workspace label with a navigator-style `token:\s` prefix removed (for example `project: ree-drive` → `ree-drive`), falling back to the cwd basename. For Cursor, `preview` prefers the first line of the latest assistant turn when a local agent transcript is available; otherwise it falls back to the terminal/session title. Other agents always use the session title.
 
 | Your current view | Notification |
 |---|---|

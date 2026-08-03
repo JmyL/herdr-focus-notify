@@ -27,6 +27,7 @@ struct AgentInfo {
     agent: Option<String>,
     pane_id: Option<String>,
     cwd: Option<String>,
+    workspace_id: Option<String>,
     terminal_title: Option<String>,
     terminal_title_stripped: Option<String>,
     agent_session: Option<AgentSession>,
@@ -35,6 +36,21 @@ struct AgentInfo {
 #[derive(Debug, Deserialize)]
 struct AgentSession {
     value: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceGetEnvelope {
+    result: Option<WorkspaceGetResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceGetResult {
+    workspace: Option<WorkspaceInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceInfo {
+    label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,8 +110,10 @@ pub(crate) fn cache_current_sway_container_for_pane(pane_id: &str) -> Result<(),
         .map_err(|err| format!("failed to cache sway container id: {err}"))
 }
 
-/// Prefer `basename(cwd) · preview` from `herdr agent list` when available.
+/// Prefer `{workspace_name} · {preview}` from Herdr agent/workspace metadata.
 ///
+/// Workspace name comes from `herdr workspace get` label after stripping a
+/// navigator-style `token:\s` prefix; cwd basename is the fallback.
 /// Preview is the first line of the latest Cursor assistant turn when a
 /// transcript exists; otherwise the terminal/session title.
 pub(crate) fn enrich_notification_body(notification: &mut FocusNotification, herdr_bin: &str) {
@@ -116,11 +134,7 @@ fn agent_context_body(pane_id: &str, herdr_bin: &str) -> Option<String> {
     }
 
     let json = String::from_utf8(output.stdout).ok()?;
-    agent_context_body_from_agent_list_json(pane_id, &json)
-}
-
-fn agent_context_body_from_agent_list_json(pane_id: &str, json: &str) -> Option<String> {
-    let envelope: AgentListEnvelope = serde_json::from_str(json).ok()?;
+    let envelope: AgentListEnvelope = serde_json::from_str(&json).ok()?;
     let agents = envelope.result?.agents;
     let agent = agents.into_iter().find(|agent| {
         agent
@@ -130,18 +144,50 @@ fn agent_context_body_from_agent_list_json(pane_id: &str, json: &str) -> Option<
             .is_some_and(|id| id == pane_id)
     })?;
 
-    let project = agent
+    let workspace_label = agent
+        .workspace_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|workspace_id| fetch_workspace_label(herdr_bin, workspace_id));
+
+    agent_context_body_from_agent(&agent, workspace_label.as_deref())
+}
+
+fn fetch_workspace_label(herdr_bin: &str, workspace_id: &str) -> Option<String> {
+    let output = Command::new(herdr_bin)
+        .arg("workspace")
+        .arg("get")
+        .arg(workspace_id)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let json = String::from_utf8(output.stdout).ok()?;
+    workspace_label_from_workspace_get_json(&json)
+}
+
+fn workspace_label_from_workspace_get_json(json: &str) -> Option<String> {
+    let envelope: WorkspaceGetEnvelope = serde_json::from_str(json).ok()?;
+    first_non_empty([envelope.result?.workspace?.label.as_deref()]).map(str::to_string)
+}
+
+fn agent_context_body_from_agent(
+    agent: &AgentInfo,
+    workspace_label: Option<&str>,
+) -> Option<String> {
+    let cwd_name = agent
         .cwd
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .and_then(|cwd| {
-            Path::new(cwd)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_string)
-                .filter(|name| !name.is_empty())
-        });
+        .and_then(cwd_basename);
+
+    let workspace_name = workspace_label.and_then(workspace_display_name);
+    let name = first_non_empty([workspace_name.as_deref(), cwd_name.as_deref()]);
 
     let session_title = first_non_empty([
         agent.terminal_title_stripped.as_deref(),
@@ -157,7 +203,59 @@ fn agent_context_body_from_agent_list_json(pane_id: &str, json: &str) -> Option<
             .and_then(|session| session.value.as_deref()),
     );
 
-    compose_notification_body(project.as_deref(), answer_preview.as_deref(), session_title.as_deref())
+    compose_notification_body(name, answer_preview.as_deref(), session_title.as_deref())
+}
+
+#[cfg(test)]
+fn agent_context_body_from_agent_list_json(
+    pane_id: &str,
+    json: &str,
+    workspace_label: Option<&str>,
+) -> Option<String> {
+    let envelope: AgentListEnvelope = serde_json::from_str(json).ok()?;
+    let agents = envelope.result?.agents;
+    let agent = agents.into_iter().find(|agent| {
+        agent
+            .pane_id
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|id| id == pane_id)
+    })?;
+
+    agent_context_body_from_agent(&agent, workspace_label)
+}
+
+fn cwd_basename(cwd: &str) -> Option<String> {
+    Path::new(cwd)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .filter(|name| !name.is_empty())
+}
+
+/// Navigator-style labels look like `project: ree-drive` / `dir: foo`.
+/// Take the text after the first `[^\s]+:\s`; otherwise use the whole label.
+fn workspace_display_name(label: &str) -> Option<String> {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some((prefix, after_colon)) = trimmed.split_once(':') {
+        let prefix_ok = !prefix.is_empty() && !prefix.chars().any(char::is_whitespace);
+        let has_space_after_colon = after_colon
+            .chars()
+            .next()
+            .is_some_and(char::is_whitespace);
+        if prefix_ok && has_space_after_colon {
+            let name = after_colon.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+
+    Some(trimmed.to_string())
 }
 
 fn compose_notification_body(
@@ -504,8 +602,65 @@ mod tests {
         }"#;
 
         assert_eq!(
-            agent_context_body_from_agent_list_json("w13:p1", json),
+            agent_context_body_from_agent_list_json("w13:p1", json, None),
             Some("real-fake-peripheral · Hello There".to_string())
+        );
+    }
+
+    #[test]
+    fn prefers_workspace_label_over_cwd_basename() {
+        let json = r#"{
+            "result": {
+                "agents": [
+                    {
+                        "agent": "cursor",
+                        "focused": false,
+                        "pane_id": "w1K:p2",
+                        "cwd": "/home/sungsik/.config",
+                        "workspace_id": "w1K",
+                        "terminal_title": "Hello",
+                        "terminal_title_stripped": "Hello"
+                    }
+                ]
+            }
+        }"#;
+
+        assert_eq!(
+            agent_context_body_from_agent_list_json("w1K:p2", json, Some("project: dotfiles")),
+            Some("dotfiles · Hello".to_string())
+        );
+    }
+
+    #[test]
+    fn strips_navigator_style_workspace_labels() {
+        assert_eq!(
+            workspace_display_name("project: ree-drive").as_deref(),
+            Some("ree-drive")
+        );
+        assert_eq!(workspace_display_name("dir: vifm").as_deref(), Some("vifm"));
+        assert_eq!(workspace_display_name("~").as_deref(), Some("~"));
+        assert_eq!(
+            workspace_display_name("project:ree-drive").as_deref(),
+            Some("project:ree-drive")
+        );
+    }
+
+    #[test]
+    fn parses_workspace_label_from_workspace_get_json() {
+        let json = r#"{
+            "id": "cli:workspace:get",
+            "result": {
+                "type": "workspace_info",
+                "workspace": {
+                    "label": "project: ask",
+                    "workspace_id": "w1J"
+                }
+            }
+        }"#;
+
+        assert_eq!(
+            workspace_label_from_workspace_get_json(json).as_deref(),
+            Some("project: ask")
         );
     }
 
@@ -553,7 +708,7 @@ mod tests {
         }"#;
 
         assert_eq!(
-            agent_context_body_from_agent_list_json("w1:p1", json),
+            agent_context_body_from_agent_list_json("w1:p1", json, None),
             Some("project".to_string())
         );
     }
@@ -568,6 +723,9 @@ mod tests {
             }
         }"#;
 
-        assert_eq!(agent_context_body_from_agent_list_json("w1:p9", json), None);
+        assert_eq!(
+            agent_context_body_from_agent_list_json("w1:p9", json, None),
+            None
+        );
     }
 }
