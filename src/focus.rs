@@ -9,7 +9,7 @@ use crate::notifier::host_command;
 use crate::state::{cache_sway_container_id, cached_sway_container_id};
 use crate::util::sanitize_group_id;
 
-const NOTIFICATION_BODY_MAX_CHARS: usize = 120;
+const NOTIFICATION_BODY_MAX_CHARS: usize = 280;
 
 #[derive(Debug, Deserialize)]
 struct AgentListEnvelope {
@@ -690,10 +690,10 @@ mod tests {
     }
 
     #[test]
-    fn truncates_notification_body_to_120_chars() {
-        let long = "x".repeat(200);
+    fn truncates_notification_body_to_max_chars() {
+        let long = "x".repeat(400);
         let body = compose_notification_body(Some("proj"), Some(&long), None).unwrap();
-        assert_eq!(body.chars().count(), 120);
+        assert_eq!(body.chars().count(), NOTIFICATION_BODY_MAX_CHARS);
         assert!(body.ends_with("..."));
         assert!(body.starts_with("proj · "));
     }

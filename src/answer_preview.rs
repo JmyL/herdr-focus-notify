@@ -6,18 +6,17 @@ use std::process::Command;
 
 use serde::Deserialize;
 
-const PREVIEW_SIDE_MAX_CHARS: usize = 40;
-const PREVIEW_SINGLE_MAX_CHARS: usize = 83;
-const PREVIEW_SEPARATOR: &str = " … ";
+const PREVIEW_SIDE_MAX_CHARS: usize = 100;
+const PREVIEW_SEPARATOR: &str = "\n...\n";
 
 /// Prefer a prose preview of the latest Cursor assistant turn when a transcript exists.
 ///
-/// Preview is `{first_prose} … {last_prose}` (40 chars each), skipping fenced code and
-/// code-like lines. A single prose line is used alone. Session id resolution prefers
-/// the live Cursor chat opened by the pane's agent process
-/// (`~/.cursor/chats/**/<session>/store.db` via `/proc` or `lsof`), because Herdr's
-/// `agent_session` can stay stale after `/clear`. Falls back to the Herdr-reported
-/// session id when live resolution is unavailable.
+/// Preview is `{first_prose...}\n...\n{last_prose...}` (100 chars each), after stripping
+/// inline markdown and skipping fenced/code-like lines. A single prose line is used
+/// alone. Session id resolution prefers the live Cursor chat opened by the pane's
+/// agent process (`~/.cursor/chats/**/<session>/store.db` via `/proc` or `lsof`),
+/// because Herdr's `agent_session` can stay stale after `/clear`. Falls back to the
+/// Herdr-reported session id when live resolution is unavailable.
 pub(crate) fn latest_answer_preview(
     agent: Option<&str>,
     herdr_session_id: Option<&str>,
@@ -271,24 +270,190 @@ fn message_text(message: Option<&TranscriptMessage>) -> Option<String> {
 
 fn prose_preview_from_text(text: &str) -> Option<String> {
     let without_fences = strip_fenced_code(text);
-    let prose_lines: Vec<&str> = without_fences
+    let cleaned = strip_inline_markdown(&without_fences);
+    let prose_lines: Vec<String> = cleaned
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .filter(|line| !looks_like_code_line(line))
+        .map(str::to_string)
         .collect();
 
     match prose_lines.as_slice() {
         [] => None,
-        [only] => Some(truncate_chars(only, PREVIEW_SINGLE_MAX_CHARS)),
-        [first, .., last] if *first != *last => Some(format!(
+        [only] => Some(truncate_chars(only, PREVIEW_SIDE_MAX_CHARS)),
+        [first, .., last] if first != last => Some(format!(
             "{}{}{}",
             truncate_chars(first, PREVIEW_SIDE_MAX_CHARS),
             PREVIEW_SEPARATOR,
             truncate_chars(last, PREVIEW_SIDE_MAX_CHARS)
         )),
-        [first, ..] => Some(truncate_chars(first, PREVIEW_SINGLE_MAX_CHARS)),
+        [first, ..] => Some(truncate_chars(first, PREVIEW_SIDE_MAX_CHARS)),
     }
+}
+
+fn strip_inline_markdown(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        // Links: [label](url) -> label
+        if chars[i] == '[' {
+            if let Some((label, next)) = parse_markdown_link(&chars, i) {
+                output.push_str(&label);
+                i = next;
+                continue;
+            }
+        }
+
+        // Double-delimiter wraps: **bold**, __bold__, ~~strike~~
+        if let Some((delim_len, next)) = parse_delimited_span(&chars, i, &["**", "__", "~~"]) {
+            let inner: String = chars[i + delim_len..next - delim_len].iter().collect();
+            output.push_str(&strip_inline_markdown(&inner));
+            i = next;
+            continue;
+        }
+
+        // Backtick code: `code`
+        if chars[i] == '`' {
+            if let Some(next) = find_closing_single(&chars, i, '`') {
+                let inner: String = chars[i + 1..next].iter().collect();
+                output.push_str(&inner);
+                i = next + 1;
+                continue;
+            }
+        }
+
+        // Single-delimiter wraps: *italic*, _italic_ (avoid snake_case mid-word)
+        if chars[i] == '*' {
+            if let Some(next) = find_closing_single(&chars, i, '*') {
+                let inner: String = chars[i + 1..next].iter().collect();
+                output.push_str(&strip_inline_markdown(&inner));
+                i = next + 1;
+                continue;
+            }
+        }
+        if chars[i] == '_' && is_markdown_underscore_open(&chars, i) {
+            if let Some(next) = find_closing_underscore(&chars, i) {
+                let inner: String = chars[i + 1..next].iter().collect();
+                output.push_str(&strip_inline_markdown(&inner));
+                i = next + 1;
+                continue;
+            }
+        }
+
+        // ATX headings at line start: "# heading" -> "heading"
+        if chars[i] == '#' && (i == 0 || chars[i - 1] == '\n') {
+            let mut j = i;
+            while j < chars.len() && chars[j] == '#' {
+                j += 1;
+            }
+            if j < chars.len() && chars[j] == ' ' {
+                i = j + 1;
+                continue;
+            }
+        }
+
+        output.push(chars[i]);
+        i += 1;
+    }
+
+    output
+}
+
+fn parse_markdown_link(chars: &[char], start: usize) -> Option<(String, usize)> {
+    if chars.get(start) != Some(&'[') {
+        return None;
+    }
+    let mut i = start + 1;
+    let mut label = String::new();
+    while i < chars.len() {
+        if chars[i] == ']' {
+            break;
+        }
+        if chars[i] == '\n' {
+            return None;
+        }
+        label.push(chars[i]);
+        i += 1;
+    }
+    if i >= chars.len() || chars.get(i + 1) != Some(&'(') {
+        return None;
+    }
+    i += 2;
+    while i < chars.len() && chars[i] != ')' {
+        if chars[i] == '\n' {
+            return None;
+        }
+        i += 1;
+    }
+    if i >= chars.len() {
+        return None;
+    }
+    Some((strip_inline_markdown(&label), i + 1))
+}
+
+fn parse_delimited_span(chars: &[char], start: usize, delims: &[&str]) -> Option<(usize, usize)> {
+    for delim in delims {
+        let delim_chars: Vec<char> = delim.chars().collect();
+        if chars[start..].starts_with(&delim_chars) {
+            let mut i = start + delim_chars.len();
+            while i + delim_chars.len() <= chars.len() {
+                if chars[i..].starts_with(&delim_chars) {
+                    if i == start + delim_chars.len() {
+                        break;
+                    }
+                    return Some((delim_chars.len(), i + delim_chars.len()));
+                }
+                if chars[i] == '\n' {
+                    break;
+                }
+                i += 1;
+            }
+        }
+    }
+    None
+}
+
+fn find_closing_single(chars: &[char], start: usize, delim: char) -> Option<usize> {
+    let mut i = start + 1;
+    while i < chars.len() {
+        if chars[i] == delim {
+            if i == start + 1 {
+                return None;
+            }
+            return Some(i);
+        }
+        if chars[i] == '\n' {
+            return None;
+        }
+        i += 1;
+    }
+    None
+}
+
+fn is_markdown_underscore_open(chars: &[char], i: usize) -> bool {
+    let prev_ok = i == 0 || !chars[i - 1].is_ascii_alphanumeric();
+    let next_ok = chars.get(i + 1).is_some_and(|ch| *ch != '_' && !ch.is_whitespace());
+    prev_ok && next_ok
+}
+
+fn find_closing_underscore(chars: &[char], start: usize) -> Option<usize> {
+    let mut i = start + 1;
+    while i < chars.len() {
+        if chars[i] == '_' {
+            let next_ok = i + 1 >= chars.len() || !chars[i + 1].is_ascii_alphanumeric();
+            if i > start + 1 && next_ok {
+                return Some(i);
+            }
+        }
+        if chars[i] == '\n' {
+            return None;
+        }
+        i += 1;
+    }
+    None
 }
 
 fn strip_fenced_code(text: &str) -> String {
@@ -366,7 +531,7 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
         return trimmed.to_string();
     }
 
-    let mut output: String = trimmed.chars().take(max_chars.saturating_sub(3)).collect();
+    let mut output: String = trimmed.chars().take(max_chars).collect();
     output.push_str("...");
     output
 }
@@ -445,7 +610,7 @@ mod tests {
 
         assert_eq!(
             preview_from_transcript(&path).as_deref(),
-            Some("First prose line. … Last prose line.")
+            Some("First prose line.\n...\nLast prose line.")
         );
 
         let _ = fs::remove_file(path);
@@ -456,7 +621,7 @@ mod tests {
         let text = "```bash\necho hi\n```\nHere is the summary.\nDone for now.\n```\ncode\n```";
         assert_eq!(
             prose_preview_from_text(text).as_deref(),
-            Some("Here is the summary. … Done for now.")
+            Some("Here is the summary.\n...\nDone for now.")
         );
     }
 
@@ -465,7 +630,16 @@ mod tests {
         let text = "import os\nActual answer starts here.\nconst x = 1\nWrap-up sentence.";
         assert_eq!(
             prose_preview_from_text(text).as_deref(),
-            Some("Actual answer starts here. … Wrap-up sentence.")
+            Some("Actual answer starts here.\n...\nWrap-up sentence.")
+        );
+    }
+
+    #[test]
+    fn strips_inline_markdown_formatting() {
+        let text = "**Bold start** with a [link](https://example.com).\nMiddle.\nDone with `code` and *emphasis*.";
+        assert_eq!(
+            prose_preview_from_text(text).as_deref(),
+            Some("Bold start with a link.\n...\nDone with code and emphasis.")
         );
     }
 
@@ -486,16 +660,17 @@ mod tests {
     }
 
     #[test]
-    fn truncates_each_side_to_forty_chars() {
-        let first = "A".repeat(50);
-        let last = "B".repeat(50);
+    fn truncates_each_side_to_one_hundred_chars() {
+        let first = "A".repeat(120);
+        let last = "B".repeat(120);
         let text = format!("{first}\nmiddle\n{last}");
         let preview = prose_preview_from_text(&text).unwrap();
         let (left, right) = preview.split_once(PREVIEW_SEPARATOR).unwrap();
-        assert_eq!(left.chars().count(), PREVIEW_SIDE_MAX_CHARS);
-        assert_eq!(right.chars().count(), PREVIEW_SIDE_MAX_CHARS);
+        assert_eq!(left.chars().count(), PREVIEW_SIDE_MAX_CHARS + 3);
+        assert_eq!(right.chars().count(), PREVIEW_SIDE_MAX_CHARS + 3);
         assert!(left.ends_with("..."));
         assert!(right.ends_with("..."));
+        assert!(left.starts_with(&"A".repeat(PREVIEW_SIDE_MAX_CHARS)));
     }
 
     #[test]
@@ -508,7 +683,7 @@ mod tests {
 
         assert_eq!(
             preview_from_transcript(&path).as_deref(),
-            Some("Fresh first. … Fresh last.")
+            Some("Fresh first.\n...\nFresh last.")
         );
 
         let _ = fs::remove_file(path);
@@ -561,7 +736,7 @@ mod tests {
 
         assert_eq!(
             preview.as_deref(),
-            Some("Fresh preview line … more detail here")
+            Some("Fresh preview line\n...\nmore detail here")
         );
         let _ = fs::remove_dir_all(home);
     }
