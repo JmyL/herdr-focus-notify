@@ -6,13 +6,19 @@ use std::process::Command;
 
 use serde::Deserialize;
 
-/// Prefer the first line of the latest Cursor assistant turn when a transcript exists.
+const PREVIEW_SIDE_MAX_CHARS: usize = 40;
+const PREVIEW_SINGLE_MAX_CHARS: usize = 83;
+const PREVIEW_SEPARATOR: &str = " … ";
+
+/// Prefer a prose preview of the latest Cursor assistant turn when a transcript exists.
 ///
-/// Session id resolution prefers the live Cursor chat opened by the pane's
-/// agent process (`~/.cursor/chats/**/<session>/store.db` via `/proc` or `lsof`),
-/// because Herdr's `agent_session` can stay stale after `/clear`. Falls back to
-/// the Herdr-reported session id when live resolution is unavailable.
-pub(crate) fn latest_answer_first_line(
+/// Preview is `{first_prose} … {last_prose}` (40 chars each), skipping fenced code and
+/// code-like lines. A single prose line is used alone. Session id resolution prefers
+/// the live Cursor chat opened by the pane's agent process
+/// (`~/.cursor/chats/**/<session>/store.db` via `/proc` or `lsof`), because Herdr's
+/// `agent_session` can stay stale after `/clear`. Falls back to the Herdr-reported
+/// session id when live resolution is unavailable.
+pub(crate) fn latest_answer_preview(
     agent: Option<&str>,
     herdr_session_id: Option<&str>,
     pane_id: Option<&str>,
@@ -33,7 +39,7 @@ pub(crate) fn latest_answer_first_line(
         })?;
 
     let path = find_cursor_transcript(&session_id)?;
-    first_line_from_transcript(&path)
+    preview_from_transcript(&path)
 }
 
 fn live_cursor_session_id(pane_id: Option<&str>, herdr_bin: Option<&str>) -> Option<String> {
@@ -200,10 +206,10 @@ fn find_cursor_transcript(session_id: &str) -> Option<PathBuf> {
     None
 }
 
-fn first_line_from_transcript(path: &Path) -> Option<String> {
+fn preview_from_transcript(path: &Path) -> Option<String> {
     let file = File::open(path).ok()?;
     let reader = BufReader::new(file);
-    let mut last_first_line: Option<String> = None;
+    let mut last_preview: Option<String> = None;
 
     for line in reader.lines() {
         let line = line.ok()?;
@@ -220,12 +226,149 @@ fn first_line_from_transcript(path: &Path) -> Option<String> {
             continue;
         }
 
-        if let Some(first_line) = first_line_from_message(entry.message.as_ref()) {
-            last_first_line = Some(first_line);
+        if let Some(preview) = preview_from_message(entry.message.as_ref()) {
+            last_preview = Some(preview);
         }
     }
 
-    last_first_line
+    last_preview
+}
+
+fn preview_from_message(message: Option<&TranscriptMessage>) -> Option<String> {
+    let text = message_text(message)?;
+    prose_preview_from_text(&text)
+}
+
+fn message_text(message: Option<&TranscriptMessage>) -> Option<String> {
+    let content = message?.content.as_ref()?;
+    match content {
+        TranscriptContent::Text(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        TranscriptContent::Parts(parts) => {
+            let mut chunks = Vec::new();
+            for part in parts {
+                if part.kind.as_deref() != Some("text") {
+                    continue;
+                }
+                if let Some(text) = part.text.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+                    chunks.push(text);
+                }
+            }
+            if chunks.is_empty() {
+                None
+            } else {
+                Some(chunks.join("\n"))
+            }
+        }
+    }
+}
+
+fn prose_preview_from_text(text: &str) -> Option<String> {
+    let without_fences = strip_fenced_code(text);
+    let prose_lines: Vec<&str> = without_fences
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| !looks_like_code_line(line))
+        .collect();
+
+    match prose_lines.as_slice() {
+        [] => None,
+        [only] => Some(truncate_chars(only, PREVIEW_SINGLE_MAX_CHARS)),
+        [first, .., last] if *first != *last => Some(format!(
+            "{}{}{}",
+            truncate_chars(first, PREVIEW_SIDE_MAX_CHARS),
+            PREVIEW_SEPARATOR,
+            truncate_chars(last, PREVIEW_SIDE_MAX_CHARS)
+        )),
+        [first, ..] => Some(truncate_chars(first, PREVIEW_SINGLE_MAX_CHARS)),
+    }
+}
+
+fn strip_fenced_code(text: &str) -> String {
+    let mut output = String::new();
+    let mut in_fence = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(line);
+    }
+
+    output
+}
+
+fn looks_like_code_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if trimmed.starts_with("```") {
+        return true;
+    }
+    if trimmed.starts_with("$ ") || trimmed == "$" {
+        return true;
+    }
+    if matches!(trimmed, "{" | "}" | "};" | "})" | "},") {
+        return true;
+    }
+    if (trimmed.starts_with('{') || trimmed.starts_with('}')) && trimmed.len() <= 3 {
+        return true;
+    }
+
+    // Indentation-heavy leftovers after fence stripping.
+    if line.starts_with("    ") || line.starts_with('\t') {
+        return true;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    const PREFIXES: &[&str] = &[
+        "import ",
+        "from ",
+        "const ",
+        "let ",
+        "var ",
+        "fn ",
+        "def ",
+        "class ",
+        "pub ",
+        "function ",
+        "package ",
+        "#include",
+        "use ",
+        "export ",
+        "return ",
+        "async ",
+        "await ",
+        "#!/",
+    ];
+    PREFIXES.iter().any(|prefix| lower.starts_with(prefix))
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+
+    let mut output: String = trimmed.chars().take(max_chars.saturating_sub(3)).collect();
+    output.push_str("...");
+    output
 }
 
 #[derive(Debug, Deserialize)]
@@ -276,26 +419,6 @@ struct TranscriptPart {
     text: Option<String>,
 }
 
-fn first_line_from_message(message: Option<&TranscriptMessage>) -> Option<String> {
-    let content = message?.content.as_ref()?;
-    match content {
-        TranscriptContent::Text(text) => first_non_empty_line(text),
-        TranscriptContent::Parts(parts) => parts.iter().find_map(|part| {
-            if part.kind.as_deref() != Some("text") {
-                return None;
-            }
-            first_non_empty_line(part.text.as_deref()?)
-        }),
-    }
-}
-
-fn first_non_empty_line(text: &str) -> Option<String> {
-    text.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_string)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,19 +437,78 @@ mod tests {
     }
 
     #[test]
-    fn extracts_first_line_of_latest_assistant_text() {
+    fn joins_first_and_last_prose_lines() {
         let path = temp_transcript(
-            r#"{"role":"user","message":{"content":[{"type":"text","text":"hi"}]}}
-{"role":"assistant","message":{"content":[{"type":"text","text":"First answer.\nMore."}]}}
-{"role":"user","message":{"content":[{"type":"text","text":"again"}]}}
-{"role":"assistant","message":{"content":[{"type":"text","text":"  Latest answer first line.\nSecond."}]}}
-{"type":"turn_ended","status":"success"}
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"First prose line.\nMiddle detail.\nLast prose line."}]}}
 "#,
         );
 
         assert_eq!(
-            first_line_from_transcript(&path).as_deref(),
-            Some("Latest answer first line.")
+            preview_from_transcript(&path).as_deref(),
+            Some("First prose line. … Last prose line.")
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn skips_fenced_code_at_start_and_end() {
+        let text = "```bash\necho hi\n```\nHere is the summary.\nDone for now.\n```\ncode\n```";
+        assert_eq!(
+            prose_preview_from_text(text).as_deref(),
+            Some("Here is the summary. … Done for now.")
+        );
+    }
+
+    #[test]
+    fn skips_code_like_lines_around_prose() {
+        let text = "import os\nActual answer starts here.\nconst x = 1\nWrap-up sentence.";
+        assert_eq!(
+            prose_preview_from_text(text).as_deref(),
+            Some("Actual answer starts here. … Wrap-up sentence.")
+        );
+    }
+
+    #[test]
+    fn single_prose_line_has_no_separator() {
+        assert_eq!(
+            prose_preview_from_text("Just one line.").as_deref(),
+            Some("Just one line.")
+        );
+    }
+
+    #[test]
+    fn all_code_returns_none() {
+        assert_eq!(
+            prose_preview_from_text("```rust\nfn main() {}\n```\nconst x = 1;"),
+            None
+        );
+    }
+
+    #[test]
+    fn truncates_each_side_to_forty_chars() {
+        let first = "A".repeat(50);
+        let last = "B".repeat(50);
+        let text = format!("{first}\nmiddle\n{last}");
+        let preview = prose_preview_from_text(&text).unwrap();
+        let (left, right) = preview.split_once(PREVIEW_SEPARATOR).unwrap();
+        assert_eq!(left.chars().count(), PREVIEW_SIDE_MAX_CHARS);
+        assert_eq!(right.chars().count(), PREVIEW_SIDE_MAX_CHARS);
+        assert!(left.ends_with("..."));
+        assert!(right.ends_with("..."));
+    }
+
+    #[test]
+    fn prefers_latest_assistant_turn() {
+        let path = temp_transcript(
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Older first.\nOlder last."}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Fresh first.\nFresh last."}]}}
+"#,
+        );
+
+        assert_eq!(
+            preview_from_transcript(&path).as_deref(),
+            Some("Fresh first. … Fresh last.")
         );
 
         let _ = fs::remove_file(path);
@@ -335,7 +517,7 @@ mod tests {
     #[test]
     fn skips_non_cursor_agents() {
         assert_eq!(
-            latest_answer_first_line(
+            latest_answer_preview(
                 Some("codex"),
                 Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
                 None,
@@ -346,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn finds_transcript_under_fake_home_and_returns_latest_line() {
+    fn finds_transcript_under_fake_home_and_returns_preview() {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time")
@@ -364,20 +546,23 @@ mod tests {
         fs::write(
             &path,
             r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Older line"}]}}
-{"role":"assistant","message":{"content":[{"type":"text","text":"Fresh preview line\nmore"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Fresh preview line\nmore detail here"}]}}
 "#,
         )
         .expect("write");
 
         let previous_home = env::var_os("HOME");
         env::set_var("HOME", &home);
-        let preview = latest_answer_first_line(Some("cursor"), Some(session_id), None, None);
+        let preview = latest_answer_preview(Some("cursor"), Some(session_id), None, None);
         match previous_home {
             Some(value) => env::set_var("HOME", value),
             None => env::remove_var("HOME"),
         }
 
-        assert_eq!(preview.as_deref(), Some("Fresh preview line"));
+        assert_eq!(
+            preview.as_deref(),
+            Some("Fresh preview line … more detail here")
+        );
         let _ = fs::remove_dir_all(home);
     }
 

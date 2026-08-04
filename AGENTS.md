@@ -26,7 +26,7 @@ CI runs on `macos-latest` and executes all of the above in order (see [`.github/
 ├── Cargo.toml          # Rust package metadata; minimal dependencies (serde, serde_json)
 ├── herdr-plugin.toml   # Herdr plugin manifest: build command, actions, event subscriptions
 ├── src/main.rs         # Thin CLI/plugin entry point
-├── src/answer_preview.rs # Cursor transcript → latest answer first line
+├── src/answer_preview.rs # Cursor transcript → first/last prose preview
 ├── src/*.rs            # Focused modules for CLI, config, event parsing, focus checks, scripts, and notifier delivery
 ├── assets/icons        # Bundled local agent icons used by alerter --app-icon
 ├── tests/cli_test.rs   # Process-level CLI contract tests
@@ -54,7 +54,7 @@ There are no submodules, no external crates beyond serde/serde_json, and no buil
 5. **Notification body enrichment**:
    - After parsing the event, the plugin may replace the body with `{workspace_name} · {preview}` (truncated to 120 chars).
    - `workspace_name` comes from `herdr workspace get` label after stripping a navigator-style `[^\s]+:\s` prefix (e.g. `project: ree-drive` → `ree-drive`); cwd basename is the fallback.
-   - For Cursor, `preview` prefers the first line of the latest assistant turn from `~/.cursor/projects/**/agent-transcripts/<session>/<session>.jsonl` when present; otherwise it uses `terminal_title`.
+   - For Cursor, `preview` is first/last prose lines (40 chars each, ` … `) from the latest assistant turn in `~/.cursor/projects/**/agent-transcripts/<session>/<session>.jsonl`, skipping fenced/code-like lines; otherwise `terminal_title`.
    - Cursor session id prefers the live chat path opened by the pane agent (`~/.cursor/chats/**/<session>/store.db` via `/proc/<pid>/fd` or `lsof`), because Herdr's `agent_session` can stay stale after `/clear`. Falls back to Herdr's reported session id.
    - Non-Cursor agents keep `terminal_title` (no terminal-scrape heuristics).
 6. **Focus script generation**:

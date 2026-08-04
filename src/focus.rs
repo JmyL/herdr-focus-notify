@@ -2,7 +2,7 @@ use serde::Deserialize;
 use std::path::Path;
 use std::process::Command;
 
-use crate::answer_preview::latest_answer_first_line;
+use crate::answer_preview::latest_answer_preview;
 use crate::config::{activate_app, is_linux_notifier};
 use crate::notification::FocusNotification;
 use crate::notifier::host_command;
@@ -114,7 +114,7 @@ pub(crate) fn cache_current_sway_container_for_pane(pane_id: &str) -> Result<(),
 ///
 /// Workspace name comes from `herdr workspace get` label after stripping a
 /// navigator-style `token:\s` prefix; cwd basename is the fallback.
-/// Preview is the first line of the latest Cursor assistant turn when a
+/// Preview is first/last prose lines of the latest Cursor assistant turn when a
 /// transcript exists; otherwise the terminal/session title. For Cursor, the
 /// live chat session is resolved from the pane agent process when possible,
 /// because Herdr's reported `agent_session` can lag after `/clear`.
@@ -198,7 +198,7 @@ fn agent_context_body_from_agent(
     ])
     .map(str::to_string);
 
-    let answer_preview = latest_answer_first_line(
+    let answer_preview = latest_answer_preview(
         agent.agent.as_deref(),
         agent
             .agent_session
