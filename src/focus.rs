@@ -115,7 +115,9 @@ pub(crate) fn cache_current_sway_container_for_pane(pane_id: &str) -> Result<(),
 /// Workspace name comes from `herdr workspace get` label after stripping a
 /// navigator-style `token:\s` prefix; cwd basename is the fallback.
 /// Preview is the first line of the latest Cursor assistant turn when a
-/// transcript exists; otherwise the terminal/session title.
+/// transcript exists; otherwise the terminal/session title. For Cursor, the
+/// live chat session is resolved from the pane agent process when possible,
+/// because Herdr's reported `agent_session` can lag after `/clear`.
 pub(crate) fn enrich_notification_body(notification: &mut FocusNotification, herdr_bin: &str) {
     if let Some(body) = agent_context_body(&notification.pane_id, herdr_bin) {
         notification.body = body;
@@ -151,7 +153,7 @@ fn agent_context_body(pane_id: &str, herdr_bin: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
         .and_then(|workspace_id| fetch_workspace_label(herdr_bin, workspace_id));
 
-    agent_context_body_from_agent(&agent, workspace_label.as_deref())
+    agent_context_body_from_agent(&agent, workspace_label.as_deref(), herdr_bin)
 }
 
 fn fetch_workspace_label(herdr_bin: &str, workspace_id: &str) -> Option<String> {
@@ -178,6 +180,7 @@ fn workspace_label_from_workspace_get_json(json: &str) -> Option<String> {
 fn agent_context_body_from_agent(
     agent: &AgentInfo,
     workspace_label: Option<&str>,
+    herdr_bin: &str,
 ) -> Option<String> {
     let cwd_name = agent
         .cwd
@@ -201,6 +204,8 @@ fn agent_context_body_from_agent(
             .agent_session
             .as_ref()
             .and_then(|session| session.value.as_deref()),
+        agent.pane_id.as_deref(),
+        Some(herdr_bin),
     );
 
     compose_notification_body(name, answer_preview.as_deref(), session_title.as_deref())
@@ -222,7 +227,7 @@ fn agent_context_body_from_agent_list_json(
             .is_some_and(|id| id == pane_id)
     })?;
 
-    agent_context_body_from_agent(&agent, workspace_label)
+    agent_context_body_from_agent(&agent, workspace_label, "herdr")
 }
 
 fn cwd_basename(cwd: &str) -> Option<String> {

@@ -55,6 +55,7 @@ There are no submodules, no external crates beyond serde/serde_json, and no buil
    - After parsing the event, the plugin may replace the body with `{workspace_name} · {preview}` (truncated to 120 chars).
    - `workspace_name` comes from `herdr workspace get` label after stripping a navigator-style `[^\s]+:\s` prefix (e.g. `project: ree-drive` → `ree-drive`); cwd basename is the fallback.
    - For Cursor, `preview` prefers the first line of the latest assistant turn from `~/.cursor/projects/**/agent-transcripts/<session>/<session>.jsonl` when present; otherwise it uses `terminal_title`.
+   - Cursor session id prefers the live chat path opened by the pane agent (`~/.cursor/chats/**/<session>/store.db` via `/proc/<pid>/fd` or `lsof`), because Herdr's `agent_session` can stay stale after `/clear`. Falls back to Herdr's reported session id.
    - Non-Cursor agents keep `terminal_title` (no terminal-scrape heuristics).
 6. **Focus script generation**:
    - A shell script is written to `HERDR_PLUGIN_STATE_DIR` (falling back to `$TMPDIR/herdr-focus-notify`).
