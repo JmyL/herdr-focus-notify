@@ -19,7 +19,7 @@ use config::{is_enabled, status_is_enabled};
 use event::{focused_pane_id_from_event_json, notification_from_event_json};
 use executable::resolve_herdr_bin;
 use focus::{
-    cache_current_sway_container_for_pane, enrich_notification_body, notification_decision,
+    cache_current_sway_container_for_pane, enrich_notification, notification_decision,
     should_clear_notification_on_focus, test_notification, NotificationDecision,
 };
 use notifier::{remove_notification, resolve_notifier_bin, send_notification};
@@ -102,7 +102,7 @@ fn run() -> Result<(), String> {
     };
 
     if action == CliAction::Event {
-        enrich_notification_body(&mut notification, &herdr_bin);
+        enrich_notification(&mut notification, &herdr_bin);
     }
 
     if action != CliAction::Test && !status_is_enabled(&notification.status) {

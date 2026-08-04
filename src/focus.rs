@@ -110,21 +110,35 @@ pub(crate) fn cache_current_sway_container_for_pane(pane_id: &str) -> Result<(),
         .map_err(|err| format!("failed to cache sway container id: {err}"))
 }
 
-/// Prefer `{workspace_name} · {preview}` from Herdr agent/workspace metadata.
+/// Enrich title/body from Herdr agent/workspace metadata.
 ///
-/// Workspace name comes from `herdr workspace get` label after stripping a
-/// navigator-style `token:\s` prefix; cwd basename is the fallback.
-/// Preview is first/last prose lines of the latest Cursor assistant turn when a
-/// transcript exists; otherwise the terminal/session title. For Cursor, the
-/// live chat session is resolved from the pane agent process when possible,
-/// because Herdr's reported `agent_session` can lag after `/clear`.
-pub(crate) fn enrich_notification_body(notification: &mut FocusNotification, herdr_bin: &str) {
-    if let Some(body) = agent_context_body(&notification.pane_id, herdr_bin) {
+/// Title becomes `[{workspace_name}] {original_title}` when a workspace/cwd name
+/// is available (navigator-style `token:\s` prefix stripped; cwd basename fallback).
+/// Body is the answer/session preview only — first/last prose lines of the latest
+/// Cursor assistant turn when a transcript exists; otherwise the terminal/session
+/// title. For Cursor, the live chat session is resolved from the pane agent
+/// process when possible, because Herdr's reported `agent_session` can lag after
+/// `/clear`.
+pub(crate) fn enrich_notification(notification: &mut FocusNotification, herdr_bin: &str) {
+    let Some(context) = agent_context(&notification.pane_id, herdr_bin) else {
+        return;
+    };
+
+    if let Some(name) = context.workspace_name {
+        notification.title = compose_notification_title(Some(&name), &notification.title);
+    }
+    if let Some(body) = context.body {
         notification.body = body;
     }
 }
 
-fn agent_context_body(pane_id: &str, herdr_bin: &str) -> Option<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NotificationContext {
+    workspace_name: Option<String>,
+    body: Option<String>,
+}
+
+fn agent_context(pane_id: &str, herdr_bin: &str) -> Option<NotificationContext> {
     let output = Command::new(herdr_bin)
         .arg("agent")
         .arg("list")
@@ -153,7 +167,11 @@ fn agent_context_body(pane_id: &str, herdr_bin: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
         .and_then(|workspace_id| fetch_workspace_label(herdr_bin, workspace_id));
 
-    agent_context_body_from_agent(&agent, workspace_label.as_deref(), herdr_bin)
+    Some(agent_context_from_agent(
+        &agent,
+        workspace_label.as_deref(),
+        herdr_bin,
+    ))
 }
 
 fn fetch_workspace_label(herdr_bin: &str, workspace_id: &str) -> Option<String> {
@@ -177,11 +195,11 @@ fn workspace_label_from_workspace_get_json(json: &str) -> Option<String> {
     first_non_empty([envelope.result?.workspace?.label.as_deref()]).map(str::to_string)
 }
 
-fn agent_context_body_from_agent(
+fn agent_context_from_agent(
     agent: &AgentInfo,
     workspace_label: Option<&str>,
     herdr_bin: &str,
-) -> Option<String> {
+) -> NotificationContext {
     let cwd_name = agent
         .cwd
         .as_deref()
@@ -190,13 +208,12 @@ fn agent_context_body_from_agent(
         .and_then(cwd_basename);
 
     let workspace_name = workspace_label.and_then(workspace_display_name);
-    let name = first_non_empty([workspace_name.as_deref(), cwd_name.as_deref()]);
+    let name = first_non_empty([workspace_name.as_deref(), cwd_name.as_deref()]).map(str::to_string);
 
     let session_title = first_non_empty([
         agent.terminal_title_stripped.as_deref(),
         agent.terminal_title.as_deref(),
-    ])
-    .map(str::to_string);
+    ]);
 
     let answer_preview = latest_answer_preview(
         agent.agent.as_deref(),
@@ -208,15 +225,18 @@ fn agent_context_body_from_agent(
         Some(herdr_bin),
     );
 
-    compose_notification_body(name, answer_preview.as_deref(), session_title.as_deref())
+    NotificationContext {
+        workspace_name: name,
+        body: compose_notification_body(answer_preview.as_deref(), session_title),
+    }
 }
 
 #[cfg(test)]
-fn agent_context_body_from_agent_list_json(
+fn agent_context_from_agent_list_json(
     pane_id: &str,
     json: &str,
     workspace_label: Option<&str>,
-) -> Option<String> {
+) -> Option<NotificationContext> {
     let envelope: AgentListEnvelope = serde_json::from_str(json).ok()?;
     let agents = envelope.result?.agents;
     let agent = agents.into_iter().find(|agent| {
@@ -227,7 +247,7 @@ fn agent_context_body_from_agent_list_json(
             .is_some_and(|id| id == pane_id)
     })?;
 
-    agent_context_body_from_agent(&agent, workspace_label, "herdr")
+    Some(agent_context_from_agent(&agent, workspace_label, "herdr"))
 }
 
 fn cwd_basename(cwd: &str) -> Option<String> {
@@ -264,20 +284,17 @@ fn workspace_display_name(label: &str) -> Option<String> {
 }
 
 fn compose_notification_body(
-    project: Option<&str>,
     answer_preview: Option<&str>,
     session_title: Option<&str>,
 ) -> Option<String> {
-    let preview = first_non_empty([answer_preview, session_title]);
+    first_non_empty([answer_preview, session_title])
+        .map(|preview| truncate(preview, NOTIFICATION_BODY_MAX_CHARS))
+}
 
-    match (project, preview) {
-        (Some(project), Some(preview)) => Some(truncate(
-            &format!("{project} · {preview}"),
-            NOTIFICATION_BODY_MAX_CHARS,
-        )),
-        (Some(project), None) => Some(truncate(project, NOTIFICATION_BODY_MAX_CHARS)),
-        (None, Some(preview)) => Some(truncate(preview, NOTIFICATION_BODY_MAX_CHARS)),
-        (None, None) => None,
+fn compose_notification_title(workspace_name: Option<&str>, base_title: &str) -> String {
+    match workspace_name.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(name) => format!("[{name}] {base_title}"),
+        None => base_title.to_string(),
     }
 }
 
@@ -590,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_context_body_from_cwd_and_terminal_title() {
+    fn builds_context_from_cwd_and_terminal_title() {
         let json = r#"{
             "result": {
                 "agents": [
@@ -607,8 +624,11 @@ mod tests {
         }"#;
 
         assert_eq!(
-            agent_context_body_from_agent_list_json("w13:p1", json, None),
-            Some("real-fake-peripheral · Hello There".to_string())
+            agent_context_from_agent_list_json("w13:p1", json, None),
+            Some(NotificationContext {
+                workspace_name: Some("real-fake-peripheral".to_string()),
+                body: Some("Hello There".to_string()),
+            })
         );
     }
 
@@ -631,8 +651,11 @@ mod tests {
         }"#;
 
         assert_eq!(
-            agent_context_body_from_agent_list_json("w1K:p2", json, Some("project: dotfiles")),
-            Some("dotfiles · Hello".to_string())
+            agent_context_from_agent_list_json("w1K:p2", json, Some("project: dotfiles")),
+            Some(NotificationContext {
+                workspace_name: Some("dotfiles".to_string()),
+                body: Some("Hello".to_string()),
+            })
         );
     }
 
@@ -673,33 +696,43 @@ mod tests {
     fn prefers_answer_preview_over_session_title() {
         assert_eq!(
             compose_notification_body(
-                Some("dotfiles"),
                 Some("Latest answer first line."),
                 Some("Session From First Question")
             ),
-            Some("dotfiles · Latest answer first line.".to_string())
+            Some("Latest answer first line.".to_string())
         );
     }
 
     #[test]
     fn falls_back_to_session_title_without_answer_preview() {
         assert_eq!(
-            compose_notification_body(Some("dotfiles"), None, Some("Session From First Question")),
-            Some("dotfiles · Session From First Question".to_string())
+            compose_notification_body(None, Some("Session From First Question")),
+            Some("Session From First Question".to_string())
+        );
+    }
+
+    #[test]
+    fn prefixes_workspace_name_on_title() {
+        assert_eq!(
+            compose_notification_title(Some("ask"), "cursor finished"),
+            "[ask] cursor finished"
+        );
+        assert_eq!(
+            compose_notification_title(None, "cursor finished"),
+            "cursor finished"
         );
     }
 
     #[test]
     fn truncates_notification_body_to_max_chars() {
         let long = "x".repeat(400);
-        let body = compose_notification_body(Some("proj"), Some(&long), None).unwrap();
+        let body = compose_notification_body(Some(&long), None).unwrap();
         assert_eq!(body.chars().count(), NOTIFICATION_BODY_MAX_CHARS);
         assert!(body.ends_with("..."));
-        assert!(body.starts_with("proj · "));
     }
 
     #[test]
-    fn builds_context_body_from_cwd_only() {
+    fn builds_context_from_cwd_only() {
         let json = r#"{
             "result": {
                 "agents": [
@@ -713,8 +746,11 @@ mod tests {
         }"#;
 
         assert_eq!(
-            agent_context_body_from_agent_list_json("w1:p1", json, None),
-            Some("project".to_string())
+            agent_context_from_agent_list_json("w1:p1", json, None),
+            Some(NotificationContext {
+                workspace_name: Some("project".to_string()),
+                body: None,
+            })
         );
     }
 
@@ -729,7 +765,7 @@ mod tests {
         }"#;
 
         assert_eq!(
-            agent_context_body_from_agent_list_json("w1:p9", json, None),
+            agent_context_from_agent_list_json("w1:p9", json, None),
             None
         );
     }
