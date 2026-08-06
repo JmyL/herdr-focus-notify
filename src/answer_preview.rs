@@ -14,12 +14,14 @@ const EMPTY_ANSWER_PREVIEW: &str = "(empty)";
 ///
 /// Preview is `{first_prose...}\n...\n{last_prose...}` (100 chars each), after stripping
 /// inline markdown and skipping fenced/code-like lines. A single prose line is used
-/// alone. If the latest assistant turn has no remaining prose, the preview is
-/// `(empty)` instead of an older turn. Session id resolution prefers the live Cursor
-/// chat opened by the pane's agent process (`~/.cursor/chats/**/<session>/store.db`
-/// via `/proc` or `lsof`), because Herdr's `agent_session` can stay stale after
-/// `/clear`. Falls back to the Herdr-reported session id when live resolution is
-/// unavailable.
+/// alone. When the latest turn includes `AskQuestion` or `CreatePlan` tool_use parts,
+/// their `title`/`questions[].prompt` or `overview` are preferred over plain text
+/// (questions often live only in tool input). If the latest turn has no remaining
+/// prose and no usable tool preview, the preview is `(empty)` instead of an older
+/// turn. Session id resolution prefers the live Cursor chat opened by the pane's
+/// agent process (`~/.cursor/chats/**/<session>/store.db` via `/proc` or `lsof`),
+/// because Herdr's `agent_session` can stay stale after `/clear`. Falls back to the
+/// Herdr-reported session id when live resolution is unavailable.
 pub(crate) fn latest_answer_preview(
     agent: Option<&str>,
     herdr_session_id: Option<&str>,
@@ -239,42 +241,121 @@ fn preview_from_transcript(path: &Path) -> Option<String> {
 }
 
 fn preview_from_message(message: Option<&TranscriptMessage>) -> Option<String> {
-    let text = message_text(message)?;
-    prose_preview_from_text(&text)
-}
-
-fn message_text(message: Option<&TranscriptMessage>) -> Option<String> {
     let content = message?.content.as_ref()?;
     match content {
-        TranscriptContent::Text(text) => {
-            let trimmed = text.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        }
+        TranscriptContent::Text(text) => prose_preview_from_text(text),
         TranscriptContent::Parts(parts) => {
-            let mut chunks = Vec::new();
-            for part in parts {
-                if part.kind.as_deref() != Some("text") {
-                    continue;
-                }
-                if let Some(text) = part
-                    .text
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                {
-                    chunks.push(text);
-                }
+            // AskQuestion / CreatePlan store the user-facing ask in tool input, often
+            // with no text parts (or only status chatter). Prefer that over prose.
+            if let Some(tool_text) = tool_preview_text(parts) {
+                return prose_preview_from_text(&tool_text);
             }
-            if chunks.is_empty() {
-                None
-            } else {
-                Some(chunks.join("\n"))
+            prose_preview_from_text(&message_text_from_parts(parts)?)
+        }
+    }
+}
+
+fn message_text_from_parts(parts: &[TranscriptPart]) -> Option<String> {
+    let mut chunks = Vec::new();
+    for part in parts {
+        if part.kind.as_deref() != Some("text") {
+            continue;
+        }
+        if let Some(text) = part
+            .text
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            chunks.push(text);
+        }
+    }
+    if chunks.is_empty() {
+        None
+    } else {
+        Some(chunks.join("\n"))
+    }
+}
+
+fn tool_preview_text(parts: &[TranscriptPart]) -> Option<String> {
+    let mut ask_lines = Vec::new();
+    let mut plan_lines = Vec::new();
+
+    for part in parts {
+        if part.kind.as_deref() != Some("tool_use") {
+            continue;
+        }
+        let Some(name) = part.name.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
+            continue;
+        };
+        let Some(input) = part.input.as_ref() else {
+            continue;
+        };
+
+        if name.eq_ignore_ascii_case("AskQuestion") || name.eq_ignore_ascii_case("Ask_question") {
+            if let Some(lines) = ask_question_lines(input) {
+                ask_lines.extend(lines);
+            }
+        } else if name.eq_ignore_ascii_case("CreatePlan") {
+            if let Some(lines) = create_plan_lines(input) {
+                plan_lines.extend(lines);
             }
         }
+    }
+
+    let lines = if !ask_lines.is_empty() {
+        ask_lines
+    } else {
+        plan_lines
+    };
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+fn ask_question_lines(input: &serde_json::Value) -> Option<Vec<String>> {
+    let parsed: AskQuestionInput = serde_json::from_value(input.clone()).ok()?;
+    let mut lines = Vec::new();
+
+    push_unique_line(&mut lines, first_non_empty_line(parsed.title.as_deref()));
+    for question in parsed.questions.unwrap_or_default() {
+        push_unique_line(&mut lines, first_non_empty_line(question.prompt.as_deref()));
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines)
+    }
+}
+
+fn create_plan_lines(input: &serde_json::Value) -> Option<Vec<String>> {
+    let parsed: CreatePlanInput = serde_json::from_value(input.clone()).ok()?;
+    if let Some(overview) = first_non_empty_line(parsed.overview.as_deref()) {
+        return Some(vec![overview]);
+    }
+    if let Some(name) = first_non_empty_line(parsed.name.as_deref()) {
+        return Some(vec![name]);
+    }
+    None
+}
+
+fn first_non_empty_line(value: Option<&str>) -> Option<String> {
+    value?
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+fn push_unique_line(lines: &mut Vec<String>, line: Option<String>) {
+    let Some(line) = line else {
+        return;
+    };
+    if lines.last().map(String::as_str) != Some(line.as_str()) {
+        lines.push(line);
     }
 }
 
@@ -594,6 +675,25 @@ struct TranscriptPart {
     #[serde(rename = "type")]
     kind: Option<String>,
     text: Option<String>,
+    name: Option<String>,
+    input: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AskQuestionInput {
+    title: Option<String>,
+    questions: Option<Vec<AskQuestionItem>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AskQuestionItem {
+    prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreatePlanInput {
+    name: Option<String>,
+    overview: Option<String>,
 }
 
 #[cfg(test)]
@@ -723,6 +823,89 @@ mod tests {
         let path = temp_transcript(
             r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Older prose."}]}}
 {"role":"assistant","message":{"content":[{"type":"text","text":""}]}}
+"#,
+        );
+
+        assert_eq!(
+            preview_from_transcript(&path).as_deref(),
+            Some(EMPTY_ANSWER_PREVIEW)
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn ask_question_only_uses_title_and_prompt() {
+        let path = temp_transcript(
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Older prose."}]}}
+{"role":"assistant","message":{"content":[{"type":"tool_use","name":"AskQuestion","input":{"title":"Bluetooth 끊김 시 기본 장치 동작","questions":[{"id":"reconnect","prompt":"BT 헤드셋이 다시 연결되면 기본 장치를 어떻게 할까요?\n\n세부 설명","options":[{"id":"auto","label":"자동"}]}]}}]}}
+"#,
+        );
+
+        assert_eq!(
+            preview_from_transcript(&path).as_deref(),
+            Some(
+                "Bluetooth 끊김 시 기본 장치 동작\n...\nBT 헤드셋이 다시 연결되면 기본 장치를 어떻게 할까요?"
+            )
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn ask_question_prefers_prompt_over_status_text() {
+        let path = temp_transcript(
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"설정을 먼저 확인하겠습니다."},{"type":"tool_use","name":"AskQuestion","input":{"title":"Clarify format-on-save behavior","questions":[{"id":"how","prompt":"저장할 때 어떤 식으로 바뀌나요? (원인 좁히기용)"}]}}]}}
+"#,
+        );
+
+        assert_eq!(
+            preview_from_transcript(&path).as_deref(),
+            Some(
+                "Clarify format-on-save behavior\n...\n저장할 때 어떤 식으로 바뀌나요? (원인 좁히기용)"
+            )
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn ask_question_multiple_prompts_use_first_and_last() {
+        let path = temp_transcript(
+            r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"AskQuestion","input":{"questions":[{"id":"a","prompt":"알림 body를 어떻게 바꿀까요?"},{"id":"b","prompt":"중간 질문"},{"id":"c","prompt":"“답변의 첫번째 줄”은 어느 쪽을 말하는 건가요?"}]}}]}}
+"#,
+        );
+
+        assert_eq!(
+            preview_from_transcript(&path).as_deref(),
+            Some(
+                "알림 body를 어떻게 바꿀까요?\n...\n“답변의 첫번째 줄”은 어느 쪽을 말하는 건가요?"
+            )
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn create_plan_only_uses_overview() {
+        let path = temp_transcript(
+            r##"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"CreatePlan","input":{"name":"fuzzel size followup","overview":"지금 활성 모니터는 scale 1.0이라 DPI만으로는 부족합니다.","plan":"# long plan body\n\nmore detail"}}]}}
+"##,
+        );
+
+        assert_eq!(
+            preview_from_transcript(&path).as_deref(),
+            Some("지금 활성 모니터는 scale 1.0이라 DPI만으로는 부족합니다.")
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn non_ask_tool_use_only_returns_empty_marker() {
+        let path = temp_transcript(
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Older prose."}]}}
+{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{"command":"echo hi"}}]}}
 "#,
         );
 

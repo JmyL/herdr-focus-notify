@@ -115,10 +115,11 @@ pub(crate) fn cache_current_sway_container_for_pane(pane_id: &str) -> Result<(),
 /// Title becomes `[{workspace_name}] {original_title}` when a workspace/cwd name
 /// is available (navigator-style `token:\s` prefix stripped; cwd basename fallback).
 /// Body is the answer/session preview only — first/last prose lines of the latest
-/// Cursor assistant turn when a transcript exists (`(empty)` when that turn has
-/// no prose); otherwise the terminal/session title. For Cursor, the live chat
-/// session is resolved from the pane agent process when possible, because Herdr's
-/// reported `agent_session` can lag after `/clear`.
+/// Cursor assistant turn when a transcript exists, preferring `AskQuestion` /
+/// `CreatePlan` tool inputs over plain text (`(empty)` when that turn has neither);
+/// otherwise the terminal/session title. For Cursor, the live chat session is
+/// resolved from the pane agent process when possible, because Herdr's reported
+/// `agent_session` can lag after `/clear`.
 pub(crate) fn enrich_notification(notification: &mut FocusNotification, herdr_bin: &str) {
     let Some(context) = agent_context(&notification.pane_id, herdr_bin) else {
         return;
