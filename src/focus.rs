@@ -115,10 +115,10 @@ pub(crate) fn cache_current_sway_container_for_pane(pane_id: &str) -> Result<(),
 /// Title becomes `[{workspace_name}] {original_title}` when a workspace/cwd name
 /// is available (navigator-style `token:\s` prefix stripped; cwd basename fallback).
 /// Body is the answer/session preview only — first/last prose lines of the latest
-/// Cursor assistant turn when a transcript exists; otherwise the terminal/session
-/// title. For Cursor, the live chat session is resolved from the pane agent
-/// process when possible, because Herdr's reported `agent_session` can lag after
-/// `/clear`.
+/// Cursor assistant turn when a transcript exists (`(empty)` when that turn has
+/// no prose); otherwise the terminal/session title. For Cursor, the live chat
+/// session is resolved from the pane agent process when possible, because Herdr's
+/// reported `agent_session` can lag after `/clear`.
 pub(crate) fn enrich_notification(notification: &mut FocusNotification, herdr_bin: &str) {
     let Some(context) = agent_context(&notification.pane_id, herdr_bin) else {
         return;
@@ -208,7 +208,8 @@ fn agent_context_from_agent(
         .and_then(cwd_basename);
 
     let workspace_name = workspace_label.and_then(workspace_display_name);
-    let name = first_non_empty([workspace_name.as_deref(), cwd_name.as_deref()]).map(str::to_string);
+    let name =
+        first_non_empty([workspace_name.as_deref(), cwd_name.as_deref()]).map(str::to_string);
 
     let session_title = first_non_empty([
         agent.terminal_title_stripped.as_deref(),
@@ -268,10 +269,7 @@ fn workspace_display_name(label: &str) -> Option<String> {
 
     if let Some((prefix, after_colon)) = trimmed.split_once(':') {
         let prefix_ok = !prefix.is_empty() && !prefix.chars().any(char::is_whitespace);
-        let has_space_after_colon = after_colon
-            .chars()
-            .next()
-            .is_some_and(char::is_whitespace);
+        let has_space_after_colon = after_colon.chars().next().is_some_and(char::is_whitespace);
         if prefix_ok && has_space_after_colon {
             let name = after_colon.trim();
             if !name.is_empty() {
@@ -292,7 +290,10 @@ fn compose_notification_body(
 }
 
 fn compose_notification_title(workspace_name: Option<&str>, base_title: &str) -> String {
-    match workspace_name.map(str::trim).filter(|value| !value.is_empty()) {
+    match workspace_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         Some(name) => format!("[{name}] {base_title}"),
         None => base_title.to_string(),
     }

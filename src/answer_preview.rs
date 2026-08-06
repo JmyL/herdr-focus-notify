@@ -8,15 +8,18 @@ use serde::Deserialize;
 
 const PREVIEW_SIDE_MAX_CHARS: usize = 100;
 const PREVIEW_SEPARATOR: &str = "\n...\n";
+const EMPTY_ANSWER_PREVIEW: &str = "(empty)";
 
 /// Prefer a prose preview of the latest Cursor assistant turn when a transcript exists.
 ///
 /// Preview is `{first_prose...}\n...\n{last_prose...}` (100 chars each), after stripping
 /// inline markdown and skipping fenced/code-like lines. A single prose line is used
-/// alone. Session id resolution prefers the live Cursor chat opened by the pane's
-/// agent process (`~/.cursor/chats/**/<session>/store.db` via `/proc` or `lsof`),
-/// because Herdr's `agent_session` can stay stale after `/clear`. Falls back to the
-/// Herdr-reported session id when live resolution is unavailable.
+/// alone. If the latest assistant turn has no remaining prose, the preview is
+/// `(empty)` instead of an older turn. Session id resolution prefers the live Cursor
+/// chat opened by the pane's agent process (`~/.cursor/chats/**/<session>/store.db`
+/// via `/proc` or `lsof`), because Herdr's `agent_session` can stay stale after
+/// `/clear`. Falls back to the Herdr-reported session id when live resolution is
+/// unavailable.
 pub(crate) fn latest_answer_preview(
     agent: Option<&str>,
     herdr_session_id: Option<&str>,
@@ -28,14 +31,13 @@ pub(crate) fn latest_answer_preview(
         return None;
     }
 
-    let session_id = live_cursor_session_id(pane_id, herdr_bin)
-        .or_else(|| {
-            herdr_session_id
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .filter(|value| is_plausible_session_id(value))
-                .map(str::to_string)
-        })?;
+    let session_id = live_cursor_session_id(pane_id, herdr_bin).or_else(|| {
+        herdr_session_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .filter(|value| is_plausible_session_id(value))
+            .map(str::to_string)
+    })?;
 
     let path = find_cursor_transcript(&session_id)?;
     preview_from_transcript(&path)
@@ -225,9 +227,12 @@ fn preview_from_transcript(path: &Path) -> Option<String> {
             continue;
         }
 
-        if let Some(preview) = preview_from_message(entry.message.as_ref()) {
-            last_preview = Some(preview);
-        }
+        // Always bind preview to the latest assistant turn. An empty/code-only
+        // latest turn must not inherit an older turn's prose.
+        last_preview = Some(
+            preview_from_message(entry.message.as_ref())
+                .unwrap_or_else(|| EMPTY_ANSWER_PREVIEW.to_string()),
+        );
     }
 
     last_preview
@@ -255,7 +260,12 @@ fn message_text(message: Option<&TranscriptMessage>) -> Option<String> {
                 if part.kind.as_deref() != Some("text") {
                     continue;
                 }
-                if let Some(text) = part.text.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+                if let Some(text) = part
+                    .text
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
                     chunks.push(text);
                 }
             }
@@ -435,7 +445,9 @@ fn find_closing_single(chars: &[char], start: usize, delim: char) -> Option<usiz
 
 fn is_markdown_underscore_open(chars: &[char], i: usize) -> bool {
     let prev_ok = i == 0 || !chars[i - 1].is_ascii_alphanumeric();
-    let next_ok = chars.get(i + 1).is_some_and(|ch| *ch != '_' && !ch.is_whitespace());
+    let next_ok = chars
+        .get(i + 1)
+        .is_some_and(|ch| *ch != '_' && !ch.is_whitespace());
     prev_ok && next_ok
 }
 
@@ -597,7 +609,8 @@ mod tests {
             .as_nanos();
         let path = env::temp_dir().join(format!("herdr-focus-notify-transcript-{nanos}.jsonl"));
         let mut file = File::create(&path).expect("create transcript");
-        file.write_all(contents.as_bytes()).expect("write transcript");
+        file.write_all(contents.as_bytes())
+            .expect("write transcript");
         path
     }
 
@@ -684,6 +697,38 @@ mod tests {
         assert_eq!(
             preview_from_transcript(&path).as_deref(),
             Some("Fresh first.\n...\nFresh last.")
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn empty_latest_turn_returns_empty_marker() {
+        let path = temp_transcript(
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Older first.\nOlder last."}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"```rust\nfn main() {}\n```\nconst x = 1;"}]}}
+"#,
+        );
+
+        assert_eq!(
+            preview_from_transcript(&path).as_deref(),
+            Some(EMPTY_ANSWER_PREVIEW)
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn empty_message_latest_turn_returns_empty_marker() {
+        let path = temp_transcript(
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Older prose."}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":""}]}}
+"#,
+        );
+
+        assert_eq!(
+            preview_from_transcript(&path).as_deref(),
+            Some(EMPTY_ANSWER_PREVIEW)
         );
 
         let _ = fs::remove_file(path);

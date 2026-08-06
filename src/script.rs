@@ -111,7 +111,12 @@ fn linux_focus_script(
     let result_template_q = shell_quote(&format!("{}.result.XXXXXX", cleared_marker.display()));
     let status_template_q = shell_quote(&format!("{}.status.XXXXXX", cleared_marker.display()));
     let notify_cmd = if is_linux_dbus_notify_helper(notifier_bin) {
-        format!("run_host python3 {notifier} {title} {body}", notifier = notifier_q, title = title_q, body = body_q)
+        format!(
+            "run_host python3 {notifier} {title} {body}",
+            notifier = notifier_q,
+            title = title_q,
+            body = body_q
+        )
     } else {
         // Legacy/override path for HERDR_FOCUS_NOTIFY_NOTIFIER=notify-send (or tests).
         format!(
@@ -564,9 +569,7 @@ mod tests {
             None,
         );
 
-        assert!(script.contains(
-            "run_host python3 '/plugin/scripts/linux-notify-wait.py'"
-        ));
+        assert!(script.contains("run_host python3 '/plugin/scripts/linux-notify-wait.py'"));
         assert!(script.contains("printf '%s' \"$notification_id\" >"));
         assert!(script.contains("run_host swaymsg \"[con_id=$(printf '%s' '123')]\" focus"));
         assert!(script.contains("*default*)"));
@@ -585,9 +588,9 @@ mod tests {
             None,
         );
 
-        assert!(script.contains(
-            "run_host '/usr/bin/notify-send' --print-id -A default=Focus --wait"
-        ));
+        assert!(
+            script.contains("run_host '/usr/bin/notify-send' --print-id -A default=Focus --wait")
+        );
         assert!(!script.contains("-A focus=Focus"));
         assert!(script.contains("printf '%s' \"$notification_id\" >"));
         assert!(script.contains("run_host swaymsg \"[con_id=$(printf '%s' '123')]\" focus"));
