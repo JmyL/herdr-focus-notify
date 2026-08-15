@@ -72,6 +72,7 @@ fn focus_script_content(
             herdr_bin,
             notifier_bin,
             cached_sway_container_id(&notification.pane_id).as_deref(),
+            &sway_resolve_kitty_script(notifier_bin),
             debug_log_path,
         );
     }
@@ -90,11 +91,31 @@ fn focus_script_content(
     )
 }
 
+fn sway_resolve_kitty_script(notifier_bin: &str) -> PathBuf {
+    let notifier = Path::new(notifier_bin);
+    if notifier.file_name().and_then(|name| name.to_str()) == Some("linux-notify-wait.py") {
+        return notifier.with_file_name("linux-sway-resolve-kitty.py");
+    }
+    plugin_scripts_dir()
+        .map(|dir| dir.join("linux-sway-resolve-kitty.py"))
+        .unwrap_or_else(|| PathBuf::from("scripts/linux-sway-resolve-kitty.py"))
+}
+
+fn plugin_scripts_dir() -> Option<PathBuf> {
+    let exe = env::current_exe().ok()?;
+    let parent = exe.parent()?;
+    if parent.file_name()?.to_str()? == "release" {
+        return Some(parent.parent()?.parent()?.join("scripts"));
+    }
+    Some(parent.join("scripts"))
+}
+
 fn linux_focus_script(
     notification: &FocusNotification,
     herdr_bin: &str,
     notifier_bin: &str,
     sway_container_id: Option<&str>,
+    resolve_script: &Path,
     debug_log_path: Option<&Path>,
 ) -> String {
     let title_q = shell_quote(&notification.title);
@@ -104,6 +125,7 @@ fn linux_focus_script(
     let herdr_q = shell_quote(herdr_bin);
     let notifier_q = shell_quote(notifier_bin);
     let con_q = shell_quote(sway_container_id.unwrap_or_default());
+    let resolve_q = shell_quote(resolve_script.to_string_lossy().as_ref());
     let cleared_marker = cleared_notification_marker_path(&notification.pane_id);
     let cleared_marker_q = shell_quote(cleared_marker.to_string_lossy().as_ref());
     let notification_id_path = notification_id_path(&notification.pane_id);
@@ -164,7 +186,7 @@ fn linux_focus_script(
             script.push_str(&format!(
                 "  *default*)\n{hold}{sway_focus}{workspace_focus}    {herdr} agent focus {pane} >> {log} 2>&1\n    status=$?\n{release}    printf '%s focus exited %s\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" \"$status\" >> {log} 2>&1\n    ;;\n",
                 hold = hold_window_script(),
-                sway_focus = sway_focus_script(con_q.as_str(), Some(log_q.as_str())),
+                sway_focus = sway_focus_script(con_q.as_str(), resolve_q.as_str(), Some(log_q.as_str())),
                 workspace_focus = workspace_focus_script(
                     herdr_q.as_str(),
                     workspace_q.as_deref(),
@@ -186,7 +208,7 @@ fn linux_focus_script(
             script.push_str(&format!(
                 "  *default*)\n{hold}{sway_focus}{workspace_focus}    {herdr} agent focus {pane}\n{release}    ;;\n",
                 hold = hold_window_script(),
-                sway_focus = sway_focus_script(con_q.as_str(), None),
+                sway_focus = sway_focus_script(con_q.as_str(), resolve_q.as_str(), None),
                 workspace_focus =
                     workspace_focus_script(herdr_q.as_str(), workspace_q.as_deref(), None),
                 herdr = herdr_q,
@@ -207,9 +229,7 @@ fn hold_window_script() -> String {
 }
 
 fn release_window_hold_script() -> String {
-    String::from(
-        "    rm -f \"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/herdr-warp/hold-window\"\n",
-    )
+    String::from("    rm -f \"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/herdr-warp/hold-window\"\n")
 }
 
 fn workspace_focus_script(herdr_q: &str, workspace_q: Option<&str>, log_q: Option<&str>) -> String {
@@ -232,16 +252,21 @@ fn workspace_focus_script(herdr_q: &str, workspace_q: Option<&str>, log_q: Optio
     }
 }
 
-fn sway_focus_script(con_q: &str, log_q: Option<&str>) -> String {
+fn sway_focus_script(con_q: &str, resolve_q: &str, log_q: Option<&str>) -> String {
+    let resolve = format!(
+        "    con=$(run_host python3 {resolve} --cached {cached})\n",
+        resolve = resolve_q,
+        cached = con_q,
+    );
     match log_q {
         Some(log_q) => format!(
-            "    if [ -n {con} ]; then\n      run_host swaymsg \"[con_id=$(printf '%s' {con})]\" focus >> {log} 2>&1 || printf '%s sway focus unavailable for con_id=%s\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" {con} >> {log} 2>&1\n    else\n      printf '%s sway focus unavailable: no cached container id\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" >> {log} 2>&1\n    fi\n",
-            con = con_q,
+            "{resolve}    if [ -n \"$con\" ]; then\n      run_host swaymsg \"[con_id=$(printf '%s' \"$con\")]\" focus >> {log} 2>&1 || printf '%s sway focus unavailable for con_id=%s\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" \"$con\" >> {log} 2>&1\n    else\n      printf '%s sway focus unavailable: no live kitty container\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" >> {log} 2>&1\n    fi\n",
+            resolve = resolve,
             log = log_q,
         ),
         None => format!(
-            "    if [ -n {con} ]; then\n      run_host swaymsg \"[con_id=$(printf '%s' {con})]\" focus >/dev/null 2>&1 || printf '%s\\n' 'herdr-focus-notify: sway focus unavailable' >&2\n    else\n      printf '%s\\n' 'herdr-focus-notify: sway focus unavailable: no cached container id' >&2\n    fi\n",
-            con = con_q,
+            "{resolve}    if [ -n \"$con\" ]; then\n      run_host swaymsg \"[con_id=$(printf '%s' \"$con\")]\" focus >/dev/null 2>&1 || printf '%s\\n' 'herdr-focus-notify: sway focus unavailable' >&2\n    else\n      printf '%s\\n' 'herdr-focus-notify: sway focus unavailable: no live kitty container' >&2\n    fi\n",
+            resolve = resolve,
         ),
     }
 }
@@ -582,12 +607,16 @@ mod tests {
             "/var/home/sungsik/.local/bin/herdr",
             "/plugin/scripts/linux-notify-wait.py",
             Some("123"),
+            Path::new("/plugin/scripts/linux-sway-resolve-kitty.py"),
             None,
         );
 
         assert!(script.contains("run_host python3 '/plugin/scripts/linux-notify-wait.py'"));
         assert!(script.contains("printf '%s' \"$notification_id\" >"));
-        assert!(script.contains("run_host swaymsg \"[con_id=$(printf '%s' '123')]\" focus"));
+        assert!(script.contains(
+            "con=$(run_host python3 '/plugin/scripts/linux-sway-resolve-kitty.py' --cached '123')"
+        ));
+        assert!(script.contains("run_host swaymsg \"[con_id=$(printf '%s' \"$con\")]\" focus"));
         assert!(script.contains("*default*)"));
         assert!(!script.contains("*focus*)"));
         assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3'"));
@@ -603,6 +632,7 @@ mod tests {
             "/var/home/sungsik/.local/bin/herdr",
             "/usr/bin/notify-send",
             Some("123"),
+            Path::new("/plugin/scripts/linux-sway-resolve-kitty.py"),
             None,
         );
 
@@ -611,7 +641,9 @@ mod tests {
         );
         assert!(!script.contains("-A focus=Focus"));
         assert!(script.contains("printf '%s' \"$notification_id\" >"));
-        assert!(script.contains("run_host swaymsg \"[con_id=$(printf '%s' '123')]\" focus"));
+        assert!(script.contains(
+            "con=$(run_host python3 '/plugin/scripts/linux-sway-resolve-kitty.py' --cached '123')"
+        ));
         assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' workspace focus 'w1'"));
         assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3'"));
         assert!(script.contains("herdr-warp/hold-window"));
@@ -625,11 +657,13 @@ mod tests {
             "/var/home/sungsik/.local/bin/herdr",
             "/plugin/scripts/linux-notify-wait.py",
             None,
+            Path::new("/plugin/scripts/linux-sway-resolve-kitty.py"),
             Some(Path::new("/tmp/focus-click.log")),
         );
 
         assert!(script.contains("notifier status=%s result=%s"));
-        assert!(script.contains("sway focus unavailable: no cached container id"));
+        assert!(script.contains("sway focus unavailable: no live kitty container"));
+        assert!(script.contains("--cached ''"));
         assert!(script.contains("run_host python3 '/plugin/scripts/linux-notify-wait.py'"));
         assert!(script.contains("*default*)"));
         assert!(!script.contains("*focus*)"));
@@ -646,11 +680,81 @@ mod tests {
             "/var/home/sungsik/.local/bin/herdr",
             "/usr/bin/notify-send",
             Some("123"),
+            Path::new("/plugin/scripts/linux-sway-resolve-kitty.py"),
             None,
         );
 
         assert!(!script.contains(" workspace focus "));
         assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3'"));
-        assert!(script.contains("rm -f \"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/herdr-warp/hold-window\""));
+        assert!(script
+            .contains("rm -f \"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/herdr-warp/hold-window\""));
+    }
+
+    #[test]
+    fn resolve_helper_finds_herdr_kitty_when_cached_id_is_gone() {
+        let helper =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/linux-sway-resolve-kitty.py");
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("herdr-resolve-kitty-{stamp}"));
+        let proc_root = root.join("proc");
+        write_fake_proc(&proc_root, 10, "kitty", &[11]);
+        write_fake_proc(&proc_root, 11, "herdr", &[]);
+        let tree_path = root.join("tree.json");
+        fs::write(
+            &tree_path,
+            r#"{"id":1,"nodes":[{"id":135,"app_id":"kitty","pid":10,"nodes":[]},{"id":200,"app_id":"vivaldi-stable","pid":20,"nodes":[]}]}"#,
+        )
+        .unwrap();
+
+        let output = std::process::Command::new("python3")
+            .arg(&helper)
+            .arg("--cached")
+            .arg("119")
+            .env("HERDR_FOCUS_NOTIFY_SWAY_TREE", &tree_path)
+            .env("HERDR_FOCUS_NOTIFY_PROC_ROOT", &proc_root)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "135");
+
+        let poisoned = std::process::Command::new("python3")
+            .arg(&helper)
+            .arg("--cached")
+            .arg("200")
+            .env("HERDR_FOCUS_NOTIFY_SWAY_TREE", &tree_path)
+            .env("HERDR_FOCUS_NOTIFY_PROC_ROOT", &proc_root)
+            .output()
+            .unwrap();
+        assert!(poisoned.status.success(), "{:?}", poisoned);
+        assert_eq!(String::from_utf8_lossy(&poisoned.stdout).trim(), "135");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn write_fake_proc(proc_root: &Path, pid: u32, comm: &str, child_pids: &[u32]) {
+        let task = proc_root
+            .join(pid.to_string())
+            .join("task")
+            .join(pid.to_string());
+        fs::create_dir_all(&task).unwrap();
+        fs::write(
+            proc_root.join(pid.to_string()).join("comm"),
+            format!("{comm}\n"),
+        )
+        .unwrap();
+        fs::write(
+            proc_root.join(pid.to_string()).join("cmdline"),
+            format!("{comm}\0"),
+        )
+        .unwrap();
+        let children = child_pids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
+        fs::write(task.join("children"), format!("{children}\n")).unwrap();
     }
 }
