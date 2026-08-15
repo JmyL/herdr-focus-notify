@@ -162,7 +162,8 @@ fn linux_focus_script(
             script.push_str("status=0\n");
             script.push_str("case \"$result\" in\n");
             script.push_str(&format!(
-                "  *default*)\n{sway_focus}{workspace_focus}    {herdr} agent focus {pane} >> {log} 2>&1\n    status=$?\n    printf '%s focus exited %s\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" \"$status\" >> {log} 2>&1\n    ;;\n",
+                "  *default*)\n{hold}{sway_focus}{workspace_focus}    {herdr} agent focus {pane} >> {log} 2>&1\n    status=$?\n{release}    printf '%s focus exited %s\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" \"$status\" >> {log} 2>&1\n    ;;\n",
+                hold = hold_window_script(),
                 sway_focus = sway_focus_script(con_q.as_str(), Some(log_q.as_str())),
                 workspace_focus = workspace_focus_script(
                     herdr_q.as_str(),
@@ -172,6 +173,7 @@ fn linux_focus_script(
                 herdr = herdr_q,
                 pane = pane_q,
                 log = log_q,
+                release = release_window_hold_script(),
             ));
             script.push_str("esac\n");
             script.push_str("exit \"$status\"\n");
@@ -182,18 +184,32 @@ fn linux_focus_script(
             script.push_str("fi\n");
             script.push_str("case \"$result\" in\n");
             script.push_str(&format!(
-                "  *default*)\n{sway_focus}{workspace_focus}    exec {herdr} agent focus {pane}\n    ;;\n",
+                "  *default*)\n{hold}{sway_focus}{workspace_focus}    {herdr} agent focus {pane}\n{release}    ;;\n",
+                hold = hold_window_script(),
                 sway_focus = sway_focus_script(con_q.as_str(), None),
                 workspace_focus =
                     workspace_focus_script(herdr_q.as_str(), workspace_q.as_deref(), None),
                 herdr = herdr_q,
                 pane = pane_q,
+                release = release_window_hold_script(),
             ));
             script.push_str("esac\n");
         }
     }
 
     script
+}
+
+fn hold_window_script() -> String {
+    String::from(
+        "    hold_dir=\"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/herdr-warp\"\n    mkdir -p \"$hold_dir\"\n    python3 -c 'import time; print(int(time.time() * 1000))' >\"$hold_dir/hold-window\"\n",
+    )
+}
+
+fn release_window_hold_script() -> String {
+    String::from(
+        "    rm -f \"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/herdr-warp/hold-window\"\n",
+    )
 }
 
 fn workspace_focus_script(herdr_q: &str, workspace_q: Option<&str>, log_q: Option<&str>) -> String {
@@ -574,7 +590,9 @@ mod tests {
         assert!(script.contains("run_host swaymsg \"[con_id=$(printf '%s' '123')]\" focus"));
         assert!(script.contains("*default*)"));
         assert!(!script.contains("*focus*)"));
-        assert!(script.contains("exec '/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3'"));
+        assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3'"));
+        assert!(script.contains("herdr-warp/hold-window"));
+        assert!(!script.contains("exec '/var/home/sungsik/.local/bin/herdr' agent focus"));
         assert!(!script.contains("app_id=kitty"));
     }
 
@@ -595,7 +613,8 @@ mod tests {
         assert!(script.contains("printf '%s' \"$notification_id\" >"));
         assert!(script.contains("run_host swaymsg \"[con_id=$(printf '%s' '123')]\" focus"));
         assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' workspace focus 'w1'"));
-        assert!(script.contains("exec '/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3'"));
+        assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3'"));
+        assert!(script.contains("herdr-warp/hold-window"));
         assert!(!script.contains("app_id=kitty"));
     }
 
@@ -631,6 +650,7 @@ mod tests {
         );
 
         assert!(!script.contains(" workspace focus "));
-        assert!(script.contains("exec '/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3'"));
+        assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3'"));
+        assert!(script.contains("rm -f \"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/herdr-warp/hold-window\""));
     }
 }
