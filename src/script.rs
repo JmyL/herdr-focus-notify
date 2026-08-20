@@ -38,6 +38,7 @@ pub(crate) fn write_focus_script(
     activate_app().hash(&mut hasher);
     is_debug_enabled().hash(&mut hasher);
     is_linux_notifier().hash(&mut hasher);
+    env!("CARGO_PKG_VERSION").hash(&mut hasher);
     cached_sway_container_id(&notification.pane_id).hash(&mut hasher);
 
     let script_path = state_dir.join(format!("focus-{:016x}.sh", hasher.finish()));
@@ -184,7 +185,7 @@ fn linux_focus_script(
             script.push_str("status=0\n");
             script.push_str("case \"$result\" in\n");
             script.push_str(&format!(
-                "  *default*)\n{hold}{sway_focus}{workspace_focus}    {herdr} agent focus {pane} >> {log} 2>&1\n    status=$?\n{release}    printf '%s focus exited %s\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" \"$status\" >> {log} 2>&1\n    ;;\n",
+                "  *default*)\n{hold}{sway_focus}{workspace_focus}    {herdr} agent focus {pane} >> {log} 2>&1\n    status=$?\n{warp}{release}    printf '%s focus exited %s\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" \"$status\" >> {log} 2>&1\n    ;;\n",
                 hold = hold_window_script(),
                 sway_focus = sway_focus_script(con_q.as_str(), resolve_q.as_str(), Some(log_q.as_str())),
                 workspace_focus = workspace_focus_script(
@@ -195,6 +196,7 @@ fn linux_focus_script(
                 herdr = herdr_q,
                 pane = pane_q,
                 log = log_q,
+                warp = warp_after_focus_script(Some(log_q.as_str())),
                 release = release_window_hold_script(),
             ));
             script.push_str("esac\n");
@@ -206,13 +208,14 @@ fn linux_focus_script(
             script.push_str("fi\n");
             script.push_str("case \"$result\" in\n");
             script.push_str(&format!(
-                "  *default*)\n{hold}{sway_focus}{workspace_focus}    {herdr} agent focus {pane}\n{release}    ;;\n",
+                "  *default*)\n{hold}{sway_focus}{workspace_focus}    {herdr} agent focus {pane}\n{warp}{release}    ;;\n",
                 hold = hold_window_script(),
                 sway_focus = sway_focus_script(con_q.as_str(), resolve_q.as_str(), None),
                 workspace_focus =
                     workspace_focus_script(herdr_q.as_str(), workspace_q.as_deref(), None),
                 herdr = herdr_q,
                 pane = pane_q,
+                warp = warp_after_focus_script(None),
                 release = release_window_hold_script(),
             ));
             script.push_str("esac\n");
@@ -230,6 +233,20 @@ fn hold_window_script() -> String {
 
 fn release_window_hold_script() -> String {
     String::from("    rm -f \"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/herdr-warp/hold-window\"\n")
+}
+
+fn warp_after_focus_script(log_q: Option<&str>) -> String {
+    // Pane.focused does not fire when the target pane is already focused, so
+    // notification clicks must warp explicitly after agent focus.
+    match log_q {
+        Some(log_q) => format!(
+            "    warp=\"${{HOME}}/.local/bin/herdr-warp-on-focus\"\n    if [ -x \"$warp\" ]; then\n      \"$warp\" >> {log} 2>&1 || true\n    fi\n",
+            log = log_q,
+        ),
+        None => String::from(
+            "    warp=\"${HOME}/.local/bin/herdr-warp-on-focus\"\n    if [ -x \"$warp\" ]; then\n      \"$warp\" >/dev/null 2>&1 || true\n    fi\n",
+        ),
+    }
 }
 
 fn workspace_focus_script(herdr_q: &str, workspace_q: Option<&str>, log_q: Option<&str>) -> String {
@@ -427,6 +444,21 @@ fn make_executable(_path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    fn assert_linux_click_warps_after_agent_focus(script: &str) {
+        let agent = script
+            .find("agent focus")
+            .expect("linux click script focuses the agent pane");
+        let warp = script
+            .find("herdr-warp-on-focus")
+            .expect("linux click script warps the pointer");
+        let release = script
+            .find("rm -f \"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/herdr-warp/hold-window\"")
+            .expect("linux click script releases hold-window");
+        assert!(agent < warp, "warp must run after agent focus");
+        assert!(warp < release, "warp must run before releasing hold-window");
+        assert!(script.contains("[ -x \"$warp\" ]"));
+    }
+
     fn sample_notification() -> FocusNotification {
         FocusNotification {
             pane_id: "w1:p3".to_string(),
@@ -621,6 +653,7 @@ mod tests {
         assert!(!script.contains("*focus*)"));
         assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3'"));
         assert!(script.contains("herdr-warp/hold-window"));
+        assert_linux_click_warps_after_agent_focus(&script);
         assert!(!script.contains("exec '/var/home/sungsik/.local/bin/herdr' agent focus"));
         assert!(!script.contains("app_id=kitty"));
     }
@@ -647,6 +680,7 @@ mod tests {
         assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' workspace focus 'w1'"));
         assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3'"));
         assert!(script.contains("herdr-warp/hold-window"));
+        assert_linux_click_warps_after_agent_focus(&script);
         assert!(!script.contains("app_id=kitty"));
     }
 
@@ -669,6 +703,8 @@ mod tests {
         assert!(!script.contains("*focus*)"));
         assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' workspace focus 'w1'"));
         assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3' >> '/tmp/focus-click.log' 2>&1"));
+        assert_linux_click_warps_after_agent_focus(&script);
+        assert!(script.contains("\"$warp\" >> '/tmp/focus-click.log' 2>&1"));
     }
 
     #[test]
@@ -686,6 +722,7 @@ mod tests {
 
         assert!(!script.contains(" workspace focus "));
         assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3'"));
+        assert_linux_click_warps_after_agent_focus(&script);
         assert!(script
             .contains("rm -f \"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/herdr-warp/hold-window\""));
     }

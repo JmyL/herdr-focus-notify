@@ -67,7 +67,7 @@ HERDR_FOCUS_NOTIFY_ACTIVATE_APP=kitty
 
 点击 macOS 通知后，插件会激活配置的终端 App，然后执行 `herdr agent focus <pane>`。
 
-在 Linux/Sway 上，点击通知正文/default action 后，插件会执行 `swaymsg '[con_id=<cached-id>]' focus`，再在事件包含 workspace 时执行 `herdr workspace focus <workspace>`，最后执行 `herdr agent focus <pane>`。如果 Sway 或 workspace 聚焦不可用，脚本会记录警告并继续执行 Herdr pane 聚焦命令。
+在 Linux/Sway 上，点击通知正文/default action 后，插件会执行 `swaymsg '[con_id=<cached-id>]' focus`，再在事件包含 workspace 时执行 `herdr workspace focus <workspace>`，然后执行 `herdr agent focus <pane>`。若已安装 `herdr-warp-on-focus`，接着会把指针移到当前 focused pane（pane 未变化时 `pane.focused` 不会触发）。如果 Sway 或 workspace 聚焦不可用，脚本会记录警告并继续执行 Herdr pane 聚焦命令。
 
 未配置 `ACTIVATE_APP` 时，聚焦仍能工作，但插件无法可靠判断你是否已查看 pane，因此可能会多发通知。
 
