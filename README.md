@@ -73,7 +73,7 @@ The notification title is `[{workspace}] {agent} finished` / `[{workspace}] {age
 
 Clicking a macOS notification activates the configured terminal app, then runs `herdr agent focus <pane>`.
 
-On Linux/Sway, clicking the notification body/default action runs `swaymsg '[con_id=<cached-id>]' focus`, then `herdr workspace focus <workspace>` when the event includes a workspace, then `herdr agent focus <pane>`, then `herdr-warp-on-focus` when that helper is installed so the pointer moves into the focused pane even if the pane did not change. If Sway focusing or workspace focusing is unavailable, the script logs a warning and still runs the Herdr pane focus command.
+On Linux/Sway, clicking the notification body/default action runs `swaymsg '[con_id=<cached-id>]' focus`, then `herdr workspace focus <workspace>` when the event includes a workspace, then `herdr agent focus <pane>`, then best-effort invokes the optional `herdr-pane-mouse-warp` plugin action so the pointer moves into the focused pane even if the pane did not change. If Sway focusing, workspace focusing, or the optional warp action is unavailable, the script logs a warning where applicable and still runs the Herdr pane focus command.
 
 Without `ACTIVATE_APP`, focusing still works, but the plugin cannot reliably detect that you have already seen a pane. It may therefore send extra notifications.
 

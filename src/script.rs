@@ -240,11 +240,11 @@ fn warp_after_focus_script(log_q: Option<&str>) -> String {
     // notification clicks must warp explicitly after agent focus.
     match log_q {
         Some(log_q) => format!(
-            "    warp=\"${{HOME}}/.local/bin/herdr-warp-on-focus\"\n    if [ -x \"$warp\" ]; then\n      \"$warp\" >> {log} 2>&1 || true\n    fi\n",
+            "    herdr plugin action invoke warp --plugin herdr-pane-mouse-warp >> {log} 2>&1 || true\n",
             log = log_q,
         ),
         None => String::from(
-            "    warp=\"${HOME}/.local/bin/herdr-warp-on-focus\"\n    if [ -x \"$warp\" ]; then\n      \"$warp\" >/dev/null 2>&1 || true\n    fi\n",
+            "    herdr plugin action invoke warp --plugin herdr-pane-mouse-warp >/dev/null 2>&1 || true\n",
         ),
     }
 }
@@ -449,14 +449,13 @@ mod tests {
             .find("agent focus")
             .expect("linux click script focuses the agent pane");
         let warp = script
-            .find("herdr-warp-on-focus")
+            .find("plugin action invoke warp --plugin herdr-pane-mouse-warp")
             .expect("linux click script warps the pointer");
         let release = script
             .find("rm -f \"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/herdr-warp/hold-window\"")
             .expect("linux click script releases hold-window");
         assert!(agent < warp, "warp must run after agent focus");
         assert!(warp < release, "warp must run before releasing hold-window");
-        assert!(script.contains("[ -x \"$warp\" ]"));
     }
 
     fn sample_notification() -> FocusNotification {
@@ -704,7 +703,7 @@ mod tests {
         assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' workspace focus 'w1'"));
         assert!(script.contains("'/var/home/sungsik/.local/bin/herdr' agent focus 'w1:p3' >> '/tmp/focus-click.log' 2>&1"));
         assert_linux_click_warps_after_agent_focus(&script);
-        assert!(script.contains("\"$warp\" >> '/tmp/focus-click.log' 2>&1"));
+        assert!(script.contains("plugin action invoke warp --plugin herdr-pane-mouse-warp >> '/tmp/focus-click.log' 2>&1"));
     }
 
     #[test]

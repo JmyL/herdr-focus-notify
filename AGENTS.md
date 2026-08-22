@@ -62,7 +62,7 @@ There are no submodules, no external crates beyond serde/serde_json, and no buil
    - The script name is a hash of the notification fields plus config, so repeated identical events reuse the same script path.
    - The script is made executable with mode `0o700`.
 7. **Notification delivery**:
-   - Normal plugin events spawn the script detached via `nohup sh ... &`. The script itself calls the platform notifier, then runs the configured app/Sway focus step and `herdr agent focus <pane>` if the user clicks the notification. On Linux it then runs `~/.local/bin/herdr-warp-on-focus` when that helper exists, because `pane.focused` does not fire when returning to an already-focused pane.
+   - Normal plugin events spawn the script detached via `nohup sh ... &`. The script itself calls the platform notifier, then runs the configured app/Sway focus step and `herdr agent focus <pane>` if the user clicks the notification. On Linux it then best-effort invokes `herdr plugin action invoke warp --plugin herdr-pane-mouse-warp`, because `pane.focused` does not fire when returning to an already-focused pane.
    - `--test` runs the generated script in the foreground so notifier failures surface through stderr and a non-zero exit code.
 
 ## Configuration
