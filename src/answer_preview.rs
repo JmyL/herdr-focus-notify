@@ -10,7 +10,7 @@ const PREVIEW_SIDE_MAX_CHARS: usize = 100;
 const PREVIEW_SEPARATOR: &str = "\n...\n";
 const EMPTY_ANSWER_PREVIEW: &str = "(empty)";
 
-/// Prefer a prose preview of the latest Cursor assistant turn when a transcript exists.
+/// Prefer a prose preview of the latest assistant turn when a transcript exists.
 ///
 /// Preview is `{first_prose...}\n...\n{last_prose...}` (100 chars each), after stripping
 /// inline markdown and skipping fenced/code-like lines. A single prose line is used
@@ -29,6 +29,9 @@ pub(crate) fn latest_answer_preview(
     herdr_bin: Option<&str>,
 ) -> Option<String> {
     let agent = agent.map(str::trim).filter(|value| !value.is_empty())?;
+    if agent.eq_ignore_ascii_case("codex") {
+        return latest_codex_answer_preview(herdr_session_id);
+    }
     if !agent.eq_ignore_ascii_case("cursor") {
         return None;
     }
@@ -43,6 +46,113 @@ pub(crate) fn latest_answer_preview(
 
     let path = find_cursor_transcript(&session_id)?;
     preview_from_transcript(&path)
+}
+
+fn latest_codex_answer_preview(session_id: Option<&str>) -> Option<String> {
+    let session_id = session_id
+        .map(str::trim)
+        .filter(|value| is_plausible_session_id(value))?;
+    let home = env::var_os("HOME")?;
+    let sessions = Path::new(&home).join(".codex").join("sessions");
+    let mut matches = Vec::new();
+    collect_codex_rollouts(&sessions, session_id, &mut matches).ok()?;
+    matches.sort();
+    let path = matches.pop()?;
+    preview_from_codex_transcript(&path)
+}
+
+fn collect_codex_rollouts(
+    dir: &Path,
+    session_id: &str,
+    matches: &mut Vec<PathBuf>,
+) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_codex_rollouts(&path, session_id, matches)?;
+        } else if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.starts_with("rollout-") && name.ends_with(&format!("{session_id}.jsonl"))
+            })
+        {
+            matches.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn preview_from_codex_transcript(path: &Path) -> Option<String> {
+    let file = File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let mut last_preview = None;
+
+    for line in reader.lines() {
+        let line = line.ok()?;
+        let Ok(entry) = serde_json::from_str::<CodexRecord>(&line) else {
+            continue;
+        };
+        let Some(payload) = entry.payload else {
+            continue;
+        };
+        if entry.record_type != "response_item"
+            || payload.record_type.as_deref() != Some("message")
+            || payload.role.as_deref() != Some("assistant")
+        {
+            continue;
+        }
+        if let Some(text) = payload.text() {
+            last_preview = first_prose_line_from_text(&text);
+        }
+    }
+
+    last_preview
+}
+
+fn first_prose_line_from_text(text: &str) -> Option<String> {
+    prose_preview_from_text(text)
+        .map(|preview| preview.split(PREVIEW_SEPARATOR).next().unwrap_or(&preview).to_string())
+}
+
+#[derive(Deserialize)]
+struct CodexRecord {
+    #[serde(rename = "type")]
+    record_type: String,
+    payload: Option<CodexPayload>,
+}
+
+#[derive(Deserialize)]
+struct CodexPayload {
+    #[serde(rename = "type")]
+    record_type: Option<String>,
+    role: Option<String>,
+    content: Option<Vec<CodexContent>>,
+}
+
+impl CodexPayload {
+    fn text(&self) -> Option<String> {
+        let mut text = String::new();
+        for item in self.content.as_ref()? {
+            if item.kind.as_deref() == Some("output_text") {
+                if let Some(value) = item.text.as_deref() {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(value);
+                }
+            }
+        }
+        (!text.is_empty()).then_some(text)
+    }
+}
+
+#[derive(Deserialize)]
+struct CodexContent {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    text: Option<String>,
 }
 
 fn live_cursor_session_id(pane_id: Option<&str>, herdr_bin: Option<&str>) -> Option<String> {
@@ -285,7 +395,12 @@ fn tool_preview_text(parts: &[TranscriptPart]) -> Option<String> {
         if part.kind.as_deref() != Some("tool_use") {
             continue;
         }
-        let Some(name) = part.name.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
+        let Some(name) = part
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        else {
             continue;
         };
         let Some(input) = part.input.as_ref() else {
@@ -918,16 +1033,54 @@ mod tests {
     }
 
     #[test]
-    fn skips_non_cursor_agents() {
+    fn skips_unsupported_agents() {
         assert_eq!(
             latest_answer_preview(
-                Some("codex"),
+                Some("claude"),
                 Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
                 None,
                 None
             ),
             None
         );
+    }
+
+    #[test]
+    fn finds_codex_rollout_and_returns_latest_preview() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let home = env::temp_dir().join(format!("herdr-focus-notify-codex-home-{nanos}"));
+        let session_id = "11111111-2222-3333-4444-555555555555";
+        let rollout_dir = home
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("09")
+            .join("05");
+        fs::create_dir_all(&rollout_dir).expect("mkdir");
+        fs::write(
+            rollout_dir.join(format!("rollout-2026-09-05T12-00-00-{session_id}.jsonl")),
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Older response"}]}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"First line of the latest response\nMore detail"}]}}
+"#,
+        )
+        .expect("write");
+
+        let previous_home = env::var_os("HOME");
+        env::set_var("HOME", &home);
+        let preview = latest_answer_preview(Some("codex"), Some(session_id), None, None);
+        match previous_home {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
+
+        assert_eq!(
+            preview.as_deref(),
+            Some("First line of the latest response")
+        );
+        let _ = fs::remove_dir_all(home);
     }
 
     #[test]

@@ -26,7 +26,7 @@ CI runs on `macos-latest` and executes all of the above in order (see [`.github/
 ├── Cargo.toml          # Rust package metadata; minimal dependencies (serde, serde_json)
 ├── herdr-plugin.toml   # Herdr plugin manifest: build command, actions, event subscriptions
 ├── src/main.rs         # Thin CLI/plugin entry point
-├── src/answer_preview.rs # Cursor transcript → first/last prose preview
+├── src/answer_preview.rs # Agent transcript → prose preview
 ├── src/*.rs            # Focused modules for CLI, config, event parsing, focus checks, scripts, and notifier delivery
 ├── assets/icons        # Bundled local agent icons used by alerter --app-icon
 ├── tests/cli_test.rs   # Process-level CLI contract tests
@@ -55,8 +55,9 @@ There are no submodules, no external crates beyond serde/serde_json, and no buil
    - After parsing the event, the plugin may prefix the title with `[{workspace_name}]` and replace the body with `{preview}` (truncated to 280 chars).
    - `workspace_name` comes from `herdr workspace get` label after stripping a navigator-style `[^\s]+:\s` prefix (e.g. `project: ree-drive` → `ree-drive`); cwd basename is the fallback.
    - For Cursor, `preview` is first/last prose lines (100 chars each, `{first}\n...\n{last}`) from the latest assistant turn in `~/.cursor/projects/**/agent-transcripts/<session>/<session>.jsonl`, after stripping inline markdown and skipping fenced/code-like lines. `AskQuestion` / `CreatePlan` tool_use inputs (`title` + prompts, or `overview`) are preferred over plain text for that turn. If the latest turn has neither prose nor a usable tool preview, `preview` is `(empty)` (older turns are not reused). Otherwise (no transcript) `terminal_title`.
+   - For Codex, `preview` is the first prose line of the latest assistant message in `~/.codex/sessions/**/rollout-<timestamp>-<session>.jsonl`.
    - Cursor session id prefers the live chat path opened by the pane agent (`~/.cursor/chats/**/<session>/store.db` via `/proc/<pid>/fd` or `lsof`), because Herdr's `agent_session` can stay stale after `/clear`. Falls back to Herdr's reported session id.
-   - Non-Cursor agents keep `terminal_title` (no terminal-scrape heuristics).
+   - Other non-Cursor agents keep `terminal_title` (no terminal-scrape heuristics).
 6. **Focus script generation**:
    - A shell script is written to `HERDR_PLUGIN_STATE_DIR` (falling back to `$TMPDIR/herdr-focus-notify`).
    - The script name is a hash of the notification fields plus config, so repeated identical events reuse the same script path.
