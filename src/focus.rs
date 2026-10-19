@@ -225,6 +225,7 @@ fn agent_context_from_agent(
             .and_then(|session| session.value.as_deref()),
         agent.pane_id.as_deref(),
         Some(herdr_bin),
+        agent.cwd.as_deref(),
     );
 
     NotificationContext {

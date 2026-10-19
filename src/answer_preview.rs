@@ -27,10 +27,14 @@ pub(crate) fn latest_answer_preview(
     herdr_session_id: Option<&str>,
     pane_id: Option<&str>,
     herdr_bin: Option<&str>,
+    cwd: Option<&str>,
 ) -> Option<String> {
     let agent = agent.map(str::trim).filter(|value| !value.is_empty())?;
     if agent.eq_ignore_ascii_case("codex") {
         return latest_codex_answer_preview(herdr_session_id);
+    }
+    if agent.eq_ignore_ascii_case("pi") {
+        return latest_pi_answer_preview(cwd, herdr_session_id);
     }
     if !agent.eq_ignore_ascii_case("cursor") {
         return None;
@@ -153,6 +157,140 @@ struct CodexContent {
     #[serde(rename = "type")]
     kind: Option<String>,
     text: Option<String>,
+}
+
+/// Pi stores sessions under `~/.pi/agent/sessions/--<path>--/<timestamp>_<id>.jsonl`.
+/// `<path>` is the session cwd with the leading separator removed and `/`, `\\`, `:`
+/// replaced by `-`, wrapped with `--` on both ends. Herdr does not report a session
+/// id for pi panes, so the cwd slug plus the most recently modified transcript is
+/// the primary lookup; a plausible Herdr-reported id narrows the candidates when
+/// available.
+fn pi_sessions_slug(cwd: &str) -> String {
+    let trimmed = cwd.trim().trim_end_matches('/');
+    let stripped = trimmed.strip_prefix('/').unwrap_or(trimmed);
+    let slug: String = stripped
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' => '-',
+            other => other,
+        })
+        .collect();
+    format!("--{slug}--")
+}
+
+fn latest_pi_answer_preview(cwd: Option<&str>, session_id: Option<&str>) -> Option<String> {
+    let cwd = cwd.map(str::trim).filter(|value| !value.is_empty())?;
+    let home = env::var_os("HOME")?;
+    let sessions = Path::new(&home)
+        .join(".pi")
+        .join("agent")
+        .join("sessions");
+    let slug_dir = sessions.join(pi_sessions_slug(cwd));
+    let mut candidates = Vec::new();
+    collect_pi_transcripts(&slug_dir, &mut candidates).ok()?;
+
+    let session_id = session_id
+        .map(str::trim)
+        .filter(|value| is_plausible_session_id(value));
+    let path = candidates
+        .into_iter()
+        .filter(|path| {
+            session_id.is_none_or(|id| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(&format!("_{id}.jsonl")))
+            })
+        })
+        .max()?;
+    preview_from_pi_transcript(&path)
+}
+
+fn collect_pi_transcripts(dir: &Path, matches: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file()
+            && path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
+        {
+            matches.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn preview_from_pi_transcript(path: &Path) -> Option<String> {
+    let file = File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let mut last_text: Option<String> = None;
+
+    for line in reader.lines() {
+        let line = line.ok()?;
+        let Ok(entry) = serde_json::from_str::<PiRecord>(&line) else {
+            continue;
+        };
+        let Some(message) = entry.message else {
+            continue;
+        };
+        if message.role.as_deref() != Some("assistant") {
+            continue;
+        }
+        if let Some(text) = message.text() {
+            last_text = Some(text);
+        }
+    }
+
+    last_text.and_then(|text| prose_preview_from_text(&text))
+}
+
+#[derive(Deserialize)]
+struct PiRecord {
+    message: Option<PiMessage>,
+}
+
+#[derive(Deserialize)]
+struct PiMessage {
+    role: Option<String>,
+    content: Option<PiContent>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PiContent {
+    Text(String),
+    Blocks(Vec<PiBlock>),
+}
+
+#[derive(Deserialize)]
+struct PiBlock {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    text: Option<String>,
+}
+
+impl PiMessage {
+    fn text(&self) -> Option<String> {
+        match self.content.as_ref()? {
+            PiContent::Text(text) => (!text.is_empty()).then(|| text.clone()),
+            PiContent::Blocks(blocks) => {
+                let mut text = String::new();
+                for block in blocks {
+                    // Skip `thinking` and tool blocks; only prose text previews.
+                    if block.kind.as_deref() == Some("text") {
+                        if let Some(value) = block.text.as_deref() {
+                            if !text.is_empty() {
+                                text.push('\n');
+                            }
+                            text.push_str(value);
+                        }
+                    }
+                }
+                (!text.is_empty()).then_some(text)
+            }
+        }
+    }
 }
 
 fn live_cursor_session_id(pane_id: Option<&str>, herdr_bin: Option<&str>) -> Option<String> {
@@ -1039,6 +1177,7 @@ mod tests {
                 Some("claude"),
                 Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
                 None,
+                None,
                 None
             ),
             None
@@ -1070,7 +1209,7 @@ mod tests {
 
         let previous_home = env::var_os("HOME");
         env::set_var("HOME", &home);
-        let preview = latest_answer_preview(Some("codex"), Some(session_id), None, None);
+        let preview = latest_answer_preview(Some("codex"), Some(session_id), None, None, None);
         match previous_home {
             Some(value) => env::set_var("HOME", value),
             None => env::remove_var("HOME"),
@@ -1081,6 +1220,59 @@ mod tests {
             Some("First line of the latest response")
         );
         let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn finds_pi_transcript_from_cwd_slug_and_returns_latest_preview() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let home = env::temp_dir().join(format!("herdr-focus-notify-pi-home-{nanos}"));
+        let session_id = "01a15401-aeff-708d-89bb-8825979521f6";
+        let slug_dir = home
+            .join(".pi")
+            .join("agent")
+            .join("sessions")
+            .join("--home-sungsik-.config--");
+        fs::create_dir_all(&slug_dir).expect("mkdir");
+        fs::write(
+            slug_dir.join(format!("2026-10-19T09-00-00-000Z_{session_id}.jsonl")),
+            r#"{"type":"session","version":3,"id":"01a15401-aeff-708d-89bb-8825979521f6","cwd":"/home/sungsik/.config"}
+{"type":"message","id":"a1b2c3d4","message":{"role":"assistant","content":[{"type":"text","text":"Older answer"}]}}
+{"type":"message","id":"b2c3d4e5","message":{"role":"assistant","content":[{"type":"thinking","thinking":"internal reasoning"},{"type":"text","text":"First prose line of the latest answer"},{"type":"toolCall","toolName":"read"},{"type":"text","text":"Last prose line of the latest answer"}]}}
+"#,
+        )
+        .expect("write");
+
+        let previous_home = env::var_os("HOME");
+        env::set_var("HOME", &home);
+        let preview =
+            latest_answer_preview(Some("pi"), Some(session_id), None, None, Some("/home/sungsik/.config"));
+        match previous_home {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
+
+        assert_eq!(
+            preview.as_deref(),
+            Some("First prose line of the latest answer\n...\nLast prose line of the latest answer")
+        );
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn pi_slug_matches_pi_storage_convention() {
+        assert_eq!(
+            pi_sessions_slug("/home/sungsik/.config"),
+            "--home-sungsik-.config--"
+        );
+        assert_eq!(pi_sessions_slug("/home/sungsik"), "--home-sungsik--");
+        assert_eq!(pi_sessions_slug("/tmp"), "--tmp--");
+        assert_eq!(
+            pi_sessions_slug("/home/sungsik/projects/ree-drive-main"),
+            "--home-sungsik-projects-ree-drive-main--"
+        );
     }
 
     #[test]
@@ -1109,7 +1301,7 @@ mod tests {
 
         let previous_home = env::var_os("HOME");
         env::set_var("HOME", &home);
-        let preview = latest_answer_preview(Some("cursor"), Some(session_id), None, None);
+        let preview = latest_answer_preview(Some("cursor"), Some(session_id), None, None, None);
         match previous_home {
             Some(value) => env::set_var("HOME", value),
             None => env::remove_var("HOME"),
