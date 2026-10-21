@@ -116,8 +116,13 @@ fn preview_from_codex_transcript(path: &Path) -> Option<String> {
 }
 
 fn first_prose_line_from_text(text: &str) -> Option<String> {
-    prose_preview_from_text(text)
-        .map(|preview| preview.split(PREVIEW_SEPARATOR).next().unwrap_or(&preview).to_string())
+    prose_preview_from_text(text).map(|preview| {
+        preview
+            .split(PREVIEW_SEPARATOR)
+            .next()
+            .unwrap_or(&preview)
+            .to_string()
+    })
 }
 
 #[derive(Deserialize)]
@@ -161,10 +166,12 @@ struct CodexContent {
 
 /// Pi stores sessions under `~/.pi/agent/sessions/--<path>--/<timestamp>_<id>.jsonl`.
 /// `<path>` is the session cwd with the leading separator removed and `/`, `\\`, `:`
-/// replaced by `-`, wrapped with `--` on both ends. Herdr does not report a session
-/// id for pi panes, so the cwd slug plus the most recently modified transcript is
-/// the primary lookup; a plausible Herdr-reported id narrows the candidates when
-/// available.
+/// replaced by `-`, wrapped with `--` on both ends. Herdr reports a pi pane's live
+/// session transcript path via `agent_session` (`kind: "path"`), which binds the
+/// preview to the notifying session even when several sessions share the same cwd;
+/// a plausible Herdr-reported id narrows the candidates by filename suffix when
+/// only an id is available, and otherwise the most recently modified transcript in
+/// the cwd slug directory is the fallback.
 fn pi_sessions_slug(cwd: &str) -> String {
     let trimmed = cwd.trim().trim_end_matches('/');
     let stripped = trimmed.strip_prefix('/').unwrap_or(trimmed);
@@ -178,18 +185,30 @@ fn pi_sessions_slug(cwd: &str) -> String {
     format!("--{slug}--")
 }
 
-fn latest_pi_answer_preview(cwd: Option<&str>, session_id: Option<&str>) -> Option<String> {
+/// Accepts Herdr-reported `agent_session` values in both shapes: a transcript path
+/// (`kind: "path"`, integration v9+) used directly, or a session id narrowed by
+/// filename suffix. Falls back to the most recently modified transcript in the cwd
+/// slug directory when neither resolves.
+fn latest_pi_answer_preview(cwd: Option<&str>, session_ref: Option<&str>) -> Option<String> {
+    if let Some(path) = session_ref
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter(|value| is_pi_transcript_path(value))
+    {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return preview_from_pi_transcript(&path);
+        }
+    }
+
     let cwd = cwd.map(str::trim).filter(|value| !value.is_empty())?;
     let home = env::var_os("HOME")?;
-    let sessions = Path::new(&home)
-        .join(".pi")
-        .join("agent")
-        .join("sessions");
+    let sessions = Path::new(&home).join(".pi").join("agent").join("sessions");
     let slug_dir = sessions.join(pi_sessions_slug(cwd));
     let mut candidates = Vec::new();
     collect_pi_transcripts(&slug_dir, &mut candidates).ok()?;
 
-    let session_id = session_id
+    let session_id = session_ref
         .map(str::trim)
         .filter(|value| is_plausible_session_id(value));
     let path = candidates
@@ -203,6 +222,10 @@ fn latest_pi_answer_preview(cwd: Option<&str>, session_id: Option<&str>) -> Opti
         })
         .max()?;
     preview_from_pi_transcript(&path)
+}
+
+fn is_pi_transcript_path(value: &str) -> bool {
+    Path::new(value).is_absolute() && value.ends_with(".jsonl")
 }
 
 fn collect_pi_transcripts(dir: &Path, matches: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -1247,8 +1270,13 @@ mod tests {
 
         let previous_home = env::var_os("HOME");
         env::set_var("HOME", &home);
-        let preview =
-            latest_answer_preview(Some("pi"), Some(session_id), None, None, Some("/home/sungsik/.config"));
+        let preview = latest_answer_preview(
+            Some("pi"),
+            Some(session_id),
+            None,
+            None,
+            Some("/home/sungsik/.config"),
+        );
         match previous_home {
             Some(value) => env::set_var("HOME", value),
             None => env::remove_var("HOME"),
@@ -1256,8 +1284,133 @@ mod tests {
 
         assert_eq!(
             preview.as_deref(),
-            Some("First prose line of the latest answer\n...\nLast prose line of the latest answer")
+            Some(
+                "First prose line of the latest answer\n...\nLast prose line of the latest answer"
+            )
         );
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn uses_reported_pi_transcript_path_instead_of_newest_session() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let home = env::temp_dir().join(format!("herdr-focus-notify-pi-path-{nanos}"));
+        let slug_dir = home
+            .join(".pi")
+            .join("agent")
+            .join("sessions")
+            .join("--home-sungsik-.config--");
+        fs::create_dir_all(&slug_dir).expect("mkdir");
+        let notifying_session = "01a15401-aeff-708d-89bb-8825979521f6";
+        let newer_session = "01a1608a-eef6-76d8-b17b-28e042c94726";
+        fs::write(
+            slug_dir.join(format!("2026-10-21T13-11-11-227Z_{notifying_session}.jsonl")),
+            r#"{"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"text","text":"Notifying session first line\nNotifying session last line"}]}}
+"#,
+        )
+        .expect("write");
+        fs::write(
+            slug_dir.join(format!("2026-10-21T22-18-00-311Z_{newer_session}.jsonl")),
+            r#"{"type":"message","id":"a2","message":{"role":"assistant","content":[{"type":"text","text":"Other session first line\nOther session last line"}]}}
+"#,
+        )
+        .expect("write");
+
+        let reported_path = slug_dir
+            .join(format!(
+                "2026-10-21T13-11-11-227Z_{notifying_session}.jsonl"
+            ))
+            .to_string_lossy()
+            .to_string();
+
+        let previous_home = env::var_os("HOME");
+        env::set_var("HOME", &home);
+        let preview = latest_answer_preview(
+            Some("pi"),
+            Some(&reported_path),
+            None,
+            None,
+            Some("/home/sungsik/.config"),
+        );
+        match previous_home {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
+
+        assert_eq!(
+            preview.as_deref(),
+            Some("Notifying session first line\n...\nNotifying session last line")
+        );
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn resolves_reported_pi_path_without_cwd() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let home = env::temp_dir().join(format!("herdr-focus-notify-pi-nocwd-{nanos}"));
+        let slug_dir = home
+            .join(".pi")
+            .join("agent")
+            .join("sessions")
+            .join("--home-sungsik-.config--");
+        fs::create_dir_all(&slug_dir).expect("mkdir");
+        let path =
+            slug_dir.join("2026-10-21T18-51-13-482Z_01a15fcd-9ec9-72e9-b300-5156cfb29550.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"text","text":"Only line"}]}}
+"#,
+        )
+        .expect("write");
+
+        let reported_path = path.to_string_lossy().to_string();
+        let preview = latest_answer_preview(Some("pi"), Some(&reported_path), None, None, None);
+
+        assert_eq!(preview.as_deref(), Some("Only line"));
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn falls_back_to_newest_when_reported_pi_path_is_missing() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let home = env::temp_dir().join(format!("herdr-focus-notify-pi-miss-{nanos}"));
+        let slug_dir = home
+            .join(".pi")
+            .join("agent")
+            .join("sessions")
+            .join("--home-sungsik-.config--");
+        fs::create_dir_all(&slug_dir).expect("mkdir");
+        fs::write(
+            slug_dir.join("2026-10-21T13-11-11-227Z_01a15e96-4e7a-7187-93e3-6b9ef4bc64eb.jsonl"),
+            r#"{"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"text","text":"Fallback newest line"}]}}
+"#,
+        )
+        .expect("write");
+
+        let previous_home = env::var_os("HOME");
+        env::set_var("HOME", &home);
+        let preview = latest_answer_preview(
+            Some("pi"),
+            Some("/home/sungsik/.pi/agent/sessions/--home-sungsik-.config--/2026-10-20T00-00-00-000Z_01a15e4d-3bdb-7416-9f28-b6685bd8a157.jsonl"),
+            None,
+            None,
+            Some("/home/sungsik/.config"),
+        );
+        match previous_home {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
+
+        assert_eq!(preview.as_deref(), Some("Fallback newest line"));
         let _ = fs::remove_dir_all(home);
     }
 
